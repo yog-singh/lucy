@@ -1,0 +1,54 @@
+# Lucy's SearXNG settings: the image's defaults plus the changes below.
+# Reference: https://docs.searxng.org/admin/settings/
+# The secret key is not set here: SearXNG reads it from the SEARXNG_SECRET
+# environment variable, which docker-compose.yml takes from the gitignored .env.
+
+use_default_settings: true
+
+general:
+  instance_name: "Lucy search"
+
+search:
+  # JSON is off by default and the API answers 403 without it; Lucy needs it.
+  formats:
+    - html
+    - json
+
+server:
+  # A private instance on the loopback address: no bot protection (it would
+  # need Valkey), no public-instance features, no image proxy.
+  limiter: false
+  public_instance: false
+  image_proxy: false
+
+valkey:
+  url: false
+
+# Engines: changes to the image's default set, merged by name (an entry here
+# updates the default engine of that name). Measured from this machine in
+# November 2026; engines that answer change over time, so re-check with the
+# commands in README.md when results get thin.
+engines:
+  # General web results. Of the defaults only `google cse` answers reliably, and
+  # it too was rate-limited after about 50 queries in a few minutes; `brave` is
+  # rate-limited after two or three. These three need no API key and answered
+  # 45 queries in a row without a CAPTCHA (Yahoo had a parsing error on 4).
+  - name: duckduckgo web  # duckduckgo.com (the `duckduckgo` engine uses html.duckduckgo.com)
+    disabled: false
+  - name: yahoo
+    disabled: false
+  - name: privacywall
+    disabled: false
+  # News with publication dates, alongside the default `duckduckgo news`.
+  - name: yahoo news
+    inactive: false
+  # Defaults that failed on every query; each failure waits for its timeout
+  # before the engine is suspended.
+  - name: duckduckgo  # CAPTCHA on every query
+    disabled: true
+  - name: bing news  # connection error
+    disabled: true
+  - name: google news  # access denied
+    disabled: true
+  - name: reuters  # HTTP error
+    disabled: true
