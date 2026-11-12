@@ -1,0 +1,37 @@
+category = "recall"
+description = "People around the user and their details, recalled in a later session."
+
+[[steps]]
+do = "say"
+text = "My sister Ana lives in Valencia. She's a vet and has two greyhounds."
+
+[[steps]]
+do = "say"
+text = "And my brother Tomás plays bass in a jazz trio in Bristol."
+
+[[steps]]
+do = "jobs"
+
+[[steps]]
+check = "statement"
+require = ["Ana"]
+any = ["Valencia"]
+
+[[steps]]
+check = "statement"
+require = ["Tomás"]
+any = ["bass"]
+
+[[steps]]
+check = "entity"
+name = "Ana"
+
+[[steps]]
+check = "answer"
+question = "What does my sister do for work?"
+any = ["vet", "veterinarian", "veterinary"]
+
+[[steps]]
+check = "answer"
+question = "Which instrument does my brother play?"
+require = ["bass"]

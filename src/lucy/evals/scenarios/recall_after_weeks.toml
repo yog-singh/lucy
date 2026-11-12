@@ -1,0 +1,39 @@
+category = "recall"
+description = "Facts from one session are still recalled two weeks of simulated time later."
+
+[[steps]]
+do = "say"
+day = 0
+text = "Quick note about me: I'm allergic to peanuts, and Ethiopian is my favourite cuisine."
+
+[[steps]]
+do = "say"
+day = 1
+text = "Also, I drive an old green Volvo estate."
+
+[[steps]]
+do = "jobs"
+
+[[steps]]
+do = "maintenance"
+advance_days = 14
+
+[[steps]]
+check = "statement"
+require = ["peanut"]
+origin = "stated"
+
+[[steps]]
+check = "answer"
+question = "Do I have any food allergies?"
+require = ["peanut"]
+
+[[steps]]
+check = "answer"
+question = "What's my favourite kind of food?"
+require = ["Ethiopian"]
+
+[[steps]]
+check = "answer"
+question = "What car do I drive?"
+require = ["Volvo"]

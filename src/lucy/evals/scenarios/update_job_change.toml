@@ -1,0 +1,38 @@
+category = "update"
+description = "A new job supersedes the old one."
+
+[[steps]]
+do = "say"
+day = 0
+text = "I work as a junior designer at Brightline, a small agency."
+
+[[steps]]
+do = "jobs"
+
+[[steps]]
+do = "say"
+day = 60
+text = "I left Brightline. This week I started as a senior designer at Kestrel Studio."
+
+[[steps]]
+do = "jobs"
+
+[[steps]]
+check = "statement"
+require = ["Kestrel"]
+
+[[steps]]
+check = "statement"
+require = ["Brightline"]
+any = ["works", "work", "designer"]
+forbid = ["left", "former", "previously", "used to"]
+exists = false
+
+[[steps]]
+check = "superseded"
+require = ["Brightline"]
+
+[[steps]]
+check = "answer"
+question = "Where do I work these days?"
+require = ["Kestrel"]

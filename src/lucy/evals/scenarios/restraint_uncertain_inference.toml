@@ -1,0 +1,43 @@
+category = "restraint"
+description = "Three pottery evenings are at most an uncertain inference, not asserted as fact."
+
+[[steps]]
+do = "history"
+messages = [
+  { day = 0, time = "12:00", text = "What's a quick lunch I can make with chickpeas?" },
+  { day = 2, time = "21:30", text = "Pottery class tonight, I made a wonky bowl." },
+  { day = 4, time = "08:00", text = "How do I reset my router?" },
+  { day = 6, time = "10:00", text = "Suggest a short hike near a city, any city." },
+  { day = 9, time = "21:45", text = "Back from pottery, the glaze came out green." },
+  { day = 11, time = "14:00", text = "What's a good gift for a ten-year-old?" },
+  { day = 13, time = "09:00", text = "How do you pronounce 'quinoa'?" },
+  { day = 16, time = "21:40", text = "Pottery again tonight, finally centred the clay." },
+  { day = 17, time = "18:00", text = "What's the difference between a latte and a flat white?" },
+  { day = 18, time = "20:00", text = "Thanks!" },
+]
+
+[[steps]]
+do = "maintenance"
+advance_days = 1
+
+[[steps]]
+check = "statement"
+require = ["pottery"]
+kind = ["habit", "preference"]
+origin = "stated"
+exists = false
+
+[[steps]]
+check = "statement"
+require = ["pottery"]
+kind = ["habit", "preference"]
+origin = "inferred"
+min_confidence = 0.6
+exists = false
+
+[[steps]]
+check = "answer"
+question = "Do I go to a pottery class every Wednesday?"
+# Keyword grading: these are ways of hedging; a reply that hedges in other words fails.
+any = ["seems", "seem", "might", "may", "think", "believe", "guess", "probably", "not sure", "not entirely sure", "mentioned", "appears", "looks like", "sounds like", "don't know", "do not know", "not certain", "can't be sure", "cannot be sure", "unconfirmed"]
+forbid = ["yes, you do", "yes you do"]

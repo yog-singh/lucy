@@ -1,0 +1,34 @@
+category = "restraint"
+description = "Greetings, thanks and general-knowledge questions store nothing."
+
+[[steps]]
+do = "say"
+text = "Hi Lucy, how are you today?"
+
+[[steps]]
+do = "say"
+text = "What's the capital of Peru?"
+
+[[steps]]
+do = "say"
+text = "Tell me a short joke about cats."
+
+[[steps]]
+do = "say"
+text = "How many kilometres is ten miles?"
+
+[[steps]]
+do = "say"
+text = "Thanks, that's great!"
+
+[[steps]]
+do = "jobs"
+
+[[steps]]
+check = "count"
+max = 0
+
+[[steps]]
+check = "entity"
+name = "Peru"
+exists = false

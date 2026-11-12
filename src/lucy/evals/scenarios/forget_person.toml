@@ -1,0 +1,37 @@
+category = "forgetting"
+description = "A forgotten person disappears with their statements and entity."
+
+[[steps]]
+do = "say"
+text = "My ex-boyfriend is called Ruben Alcott, we broke up in March."
+
+[[steps]]
+do = "say"
+text = "On a happier note, I play five-a-side football every Tuesday."
+
+[[steps]]
+do = "jobs"
+
+[[steps]]
+do = "forget"
+find = { any = ["Ruben", "Alcott"] }
+
+[[steps]]
+check = "absent"
+words = ["Ruben", "Alcott"]
+
+[[steps]]
+check = "entity"
+name = "Ruben Alcott"
+exists = false
+
+[[steps]]
+do = "rebuild"
+
+[[steps]]
+check = "absent"
+words = ["Ruben", "Alcott"]
+
+[[steps]]
+check = "statement"
+any = ["football", "five-a-side"]

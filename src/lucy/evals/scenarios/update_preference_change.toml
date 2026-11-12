@@ -1,0 +1,32 @@
+category = "update"
+description = "A changed preference replaces the old one."
+
+[[steps]]
+do = "say"
+day = 0
+text = "I drink a strong dark roast coffee every morning, can't start the day without it."
+
+[[steps]]
+do = "jobs"
+
+[[steps]]
+do = "say"
+day = 21
+text = "I've switched to decaf for good, my doctor told me to cut out caffeine."
+
+[[steps]]
+do = "jobs"
+
+[[steps]]
+check = "statement"
+require = ["decaf"]
+origin = "stated"
+
+[[steps]]
+check = "superseded"
+require = ["dark roast"]
+
+[[steps]]
+check = "answer"
+question = "I'm at a café, what coffee should I order for myself?"
+require = ["decaf"]

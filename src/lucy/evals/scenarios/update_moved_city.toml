@@ -1,0 +1,43 @@
+category = "update"
+description = "A move replaces the old city: the new one is current, the old one ended."
+
+[[steps]]
+do = "say"
+day = 0
+text = "I'm Inês. I live in Lisbon and work from home as a translator."
+
+[[steps]]
+do = "jobs"
+
+[[steps]]
+do = "say"
+day = 40
+text = "Big news: I've moved to Porto! Got the keys to my new flat there last week."
+
+[[steps]]
+do = "jobs"
+
+[[steps]]
+check = "statement"
+require = ["Porto"]
+origin = "stated"
+
+[[steps]]
+check = "statement"
+require = ["Lisbon"]
+forbid = ["Porto", "moved"]
+exists = false
+
+[[steps]]
+check = "superseded"
+require = ["Lisbon"]
+replaced_by = { require = ["Porto"] }
+
+[[steps]]
+check = "profile"
+require = ["Porto"]
+
+[[steps]]
+check = "answer"
+question = "Which city do I live in now?"
+require = ["Porto"]
