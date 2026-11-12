@@ -7,7 +7,13 @@ requires-python = ">=3.12"
 dependencies = [
     "aiosqlite>=0.22.1",
     "httpx>=0.28.1",
+    "numpy>=2.2",
+    "onnxruntime>=1.20",
+    "parakeet-mlx>=0.7.0",
+    "prompt-toolkit>=3.0.43",
     "pydantic>=2.7",
+    "sounddevice>=0.5",
+    "soxr>=1.0",
     "sqlite-vec>=0.1.9",
 ]
 

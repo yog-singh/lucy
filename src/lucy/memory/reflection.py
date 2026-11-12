@@ -122,7 +122,6 @@ from lucy.core.gateway import LLMGateway, Preempted, Priority
 from lucy.core.jobs import Handler, Job, utc_now
 from lucy.core.types import Message, Role
 from lucy.memory import fts
-from lucy.memory.graph_store import DERIVED_META_PREFIX, SQLiteGraphStore
 from lucy.memory.models import (
     DEFAULT_USER_NAME,
     USER_ENTITY_ID,
@@ -133,6 +132,7 @@ from lucy.memory.models import (
     Statement,
     StatementKind,
 )
+from lucy.memory.ports import DERIVED_META_PREFIX, GraphStore
 from lucy.memory.reconcile import Outcome, Reconciler, ReconcileResult
 from lucy.prompts import load_prompt
 
@@ -527,7 +527,7 @@ class Reflector:
 
     def __init__(
         self,
-        graph: SQLiteGraphStore,
+        graph: GraphStore,
         gateway: LLMGateway,
         reconciler: Reconciler,
         *,

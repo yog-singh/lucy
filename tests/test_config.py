@@ -6,7 +6,10 @@ from lucy.core.config import (
     AdapterConfig,
     ConfigError,
     LearningSettings,
+    LLMRoleConfig,
+    LLMSettings,
     RetrievalSettings,
+    VoiceSettings,
     load_settings,
 )
 from lucy.memory import retrieval
@@ -19,13 +22,21 @@ def test_loads_example() -> None:
     settings = load_settings(EXAMPLE)
     chat = settings.llm.roles["chat"]
     assert chat.adapter == "ollama"
-    no_thinking = {"reasoning_effort": "none"}
     assert chat.options == {
         "model": "gemma4:12b-mlx",
         "context_window": 32768,
-        "extra": no_thinking,
+        "hidden_loop_repeats": 4,
+        "extra": {"reasoning_effort": "none", "max_tokens": 1024},
     }
-    assert set(settings.llm.roles) == {"chat", "extraction", "summary"}
+    assert (chat.fallback, chat.first_output_timeout) == ("chat_deep", 60)
+    deep = settings.llm.roles["chat_deep"]
+    assert deep.options == {
+        "model": "gemma4:12b-mlx",
+        "context_window": 32768,
+        "extra": {"reasoning_effort": "low", "max_tokens": 4096},
+    }
+    assert deep.fallback is None and deep.first_output_timeout is None
+    assert set(settings.llm.roles) == {"chat", "chat_deep", "extraction", "summary"}
     assert settings.llm.roles["extraction"].options == {
         "model": "gemma4:12b-mlx",
         "context_window": 32768,
@@ -54,8 +65,15 @@ def test_loads_example() -> None:
         entity_min_similarity=retrieval.ENTITY_MIN_SIMILARITY,
         max_statements=retrieval.MAX_STATEMENTS,
     )
-    assert settings.stt == AdapterConfig(adapter="mlx_whisper", options={"model": "large-v3-turbo"})
-    assert settings.tts is not None and settings.tts.options == {"voice": "af_heart"}
+    assert settings.stt == AdapterConfig(
+        adapter="parakeet_mlx",
+        options={"model": "mlx-community/parakeet-tdt-0.6b-v2", "cache_limit_mb": 256},
+    )
+    assert settings.tts == AdapterConfig(
+        adapter="ollama", options={"model": "phonon", "voice": "default"}
+    )
+    # The example's [voice] section documents the defaults.
+    assert settings.voice == VoiceSettings()
     assert settings.embedder == AdapterConfig(
         adapter="ollama",
         options={
@@ -183,3 +201,96 @@ def test_invalid_memory_tuning(tmp_path: Path, section: str) -> None:
     path.write_text(f'[llm.roles]\nchat = {{ adapter = "a" }}\n\n{section}\n')
     with pytest.raises(ConfigError):
         load_settings(path)
+
+
+def test_voice_section(tmp_path: Path) -> None:
+    path = tmp_path / "lucy.toml"
+    path.write_text(
+        '[llm.roles]\nchat = { adapter = "a" }\n\n[voice]\nendpoint_silence_ms = 450\n'
+        'tail_ms = 0\ninput_device = "USB"\noutput_device = 3\nvad_threshold = 0.6\n'
+    )
+    voice = load_settings(path).voice
+    assert voice.endpoint_silence_ms == 450 and voice.tail_ms == 0
+    assert voice.input_device == "USB" and voice.output_device == 3
+    assert voice.vad_threshold == 0.6
+    assert voice.min_speech_ms == 160 and voice.preroll_ms == 300
+    assert voice.max_utterance_s == 30
+
+
+def test_voice_defaults_without_a_section(tmp_path: Path) -> None:
+    path = tmp_path / "lucy.toml"
+    path.write_text('[llm.roles]\nchat = { adapter = "a" }\n')
+    assert load_settings(path).voice == VoiceSettings()
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "endpoint_silence_ms = 50",
+        "vad_threshold = 1.0",
+        "tail_ms = -1",
+        "max_utterance_s = 0",
+        "min_speech_ms = 10",
+        "unknown = 1",
+    ],
+)
+def test_invalid_voice_section(tmp_path: Path, line: str) -> None:
+    path = tmp_path / "lucy.toml"
+    path.write_text(f'[llm.roles]\nchat = {{ adapter = "a" }}\n\n[voice]\n{line}\n')
+    with pytest.raises(ConfigError, match="voice"):
+        load_settings(path)
+
+
+async def test_example_speech_adapters_accept_their_options() -> None:
+    """The example's [stt] and [tts] sections construct the registered adapters (nothing
+    is loaded: Parakeet loads lazily)."""
+    from lucy.core import registry
+
+    registry.load_adapters(["lucy.adapters.stt_parakeet_mlx", "lucy.adapters.tts_openai_compat"])
+    settings = load_settings(EXAMPLE)
+    assert settings.stt is not None and settings.tts is not None
+    stt = registry.create("stt", settings.stt.adapter, **settings.stt.options)
+    assert not stt.loaded
+    await stt.aclose()
+    tts = registry.create("tts", settings.tts.adapter, **settings.tts.options)
+    assert tts.voice == "default"
+    await tts.aclose()
+
+
+def test_role_fallback_and_first_output_timeout(tmp_path: Path) -> None:
+    path = tmp_path / "lucy.toml"
+    path.write_text(
+        "[llm.roles]\n"
+        'chat = { adapter = "a", model = "m", fallback = "deep", first_output_timeout = 2.5, '
+        'after_tool = "deep" }\n'
+        'deep = { adapter = "a", model = "m" }\n'
+    )
+    roles = load_settings(path).llm.roles
+    assert roles["chat"].options == {"model": "m"}  # not passed to the adapter
+    assert (roles["chat"].fallback, roles["chat"].first_output_timeout) == ("deep", 2.5)
+    assert roles["chat"].after_tool == "deep"
+    assert (roles["deep"].fallback, roles["deep"].first_output_timeout) == (None, None)
+
+
+@pytest.mark.parametrize(
+    ("chat", "message"),
+    [
+        ('{ adapter = "a", fallback = "nope" }', "not a configured role"),
+        ('{ adapter = "a", fallback = "chat" }', "its own fallback"),
+        ('{ adapter = "a", first_output_timeout = 0 }', "greater than 0"),
+        ('{ adapter = "a", after_tool = "nope" }', "after_tool 'nope', which is not"),
+        ('{ adapter = "a", after_tool = "chat" }', "its own after_tool"),
+    ],
+)
+def test_invalid_role_fallback_settings(tmp_path: Path, chat: str, message: str) -> None:
+    path = tmp_path / "lucy.toml"
+    path.write_text(f"[llm.roles]\nchat = {chat}\n")
+    with pytest.raises(ConfigError, match=message):
+        load_settings(path)
+
+
+def test_plain_adapter_configs_are_accepted_as_roles() -> None:
+    settings = LLMSettings(roles={"chat": AdapterConfig(adapter="a", options={"model": "m"})})
+    chat = settings.roles["chat"]
+    assert isinstance(chat, LLMRoleConfig) and chat.options == {"model": "m"}
+    assert chat.fallback is None

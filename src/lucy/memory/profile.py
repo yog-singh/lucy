@@ -37,6 +37,11 @@ instruction; the attempt with fewer unsupported terms is kept, cut at a
 sentence boundary if still too long, and the remaining terms are logged and
 reported in the result. This is a heuristic: it catches invented names,
 places and numbers, not invented relationships between known words.
+`unsupported_pronouns` adds gendered pronouns ("he", "her") of a gender that
+no input statement mentions in any way (a pronoun, or a word such as "sister"),
+since the writer otherwise guesses the user's gender. It does not work out who
+a pronoun refers to, so it misses a wrong pronoun when the input mentions
+anyone of that gender.
 """
 
 from __future__ import annotations
@@ -57,7 +62,6 @@ from lucy.core.context import estimate_tokens
 from lucy.core.gateway import LLMGateway, Priority
 from lucy.core.jobs import utc_now
 from lucy.core.types import Message, Role
-from lucy.memory.graph_store import DERIVED_META_PREFIX
 from lucy.memory.models import (
     DEFAULT_USER_NAME,
     USER_ENTITY_ID,
@@ -67,7 +71,7 @@ from lucy.memory.models import (
     Statement,
     StatementKind,
 )
-from lucy.memory.ports import GraphStore
+from lucy.memory.ports import DERIVED_META_PREFIX, GraphStore
 from lucy.prompts import load_prompt
 
 log = logging.getLogger(__name__)
@@ -196,6 +200,49 @@ def _vocabulary(sources: Iterable[str]) -> set[str]:
                 vocab.add(key[:-1])
     vocab |= {full for abbr, full in _ABBREVIATIONS.items() if abbr in vocab}
     return vocab
+
+
+#: Gendered pronouns, and the words in a statement that establish someone of that
+#: gender (the pronouns themselves, or a gendered noun such as "sister").
+_PRONOUNS: Final = {
+    "male": frozenset({"he", "him", "his", "himself"}),
+    "female": frozenset({"she", "her", "hers", "herself"}),
+}
+_GENDER_EVIDENCE: Final = {
+    "male": _PRONOUNS["male"]
+    | frozenset(
+        """man men boy boys male gentleman brother brothers father dad daddy papa son sons
+        husband boyfriend fiance uncle nephew grandfather grandpa grandson stepfather stepson
+        stepbrother king mr sir""".split()
+    ),
+    "female": _PRONOUNS["female"]
+    | frozenset(
+        """woman women girl girls female lady sister sisters mother mum mom mummy mommy mama
+        daughter daughters wife girlfriend fiancee aunt niece grandmother grandma granddaughter
+        stepmother stepdaughter stepsister queen mrs ms miss madam""".split()
+    ),
+}
+
+
+def unsupported_pronouns(text: str, sources: Iterable[str]) -> list[str]:
+    """Gendered pronouns in `text` of a gender that no source mentions at all.
+
+    A gender counts as mentioned when any source uses one of its pronouns or a
+    gendered word ("sister", "husband", "Mr"). Returned lower-case, once each,
+    in order of appearance. No attempt is made to resolve who a pronoun refers to.
+    """
+    words = {_key(w) for source in sources for w in _WORD.findall(source)}
+    unsupported = {
+        pronoun
+        for gender, pronouns in _PRONOUNS.items()
+        if not words & _GENDER_EVIDENCE[gender]
+        for pronoun in pronouns
+    }
+    found: dict[str, None] = {}
+    for word in _WORD.findall(text):
+        if (key := _key(word)) in unsupported:
+            found.setdefault(key)
+    return list(found)
 
 
 def unsupported_terms(text: str, sources: Iterable[str]) -> list[str]:
@@ -422,7 +469,8 @@ class ProfileResult:
     attempts: int = 0
     truncated: bool = False
     flagged: list[str] = field(default_factory=list)
-    """Capitalised words or numbers in the saved profile found in no input statement."""
+    """Capitalised words or numbers in the saved profile found in no input statement,
+    then gendered pronouns no input statement supports (`unsupported_pronouns`)."""
 
 
 class ProfileWriter:
@@ -490,7 +538,7 @@ class ProfileWriter:
         truncated = estimate_tokens(text) > self._policy.max_tokens
         if truncated:
             text = truncate_to_tokens(text, self._policy.max_tokens)
-            flagged = unsupported_terms(text, sources)
+            flagged = _profile_flags(text, sources)
         if flagged:
             log.warning("profile mentions terms not in its input statements: %s", flagged)
         profile = await self._graph.save_profile(text)
@@ -513,7 +561,9 @@ class ProfileWriter:
         """Ask once, and once more if the text is too long or mentions unsupported terms."""
         limit = self._policy.max_tokens
         first = plain_text(await complete_text(self._gateway, self._role, messages))
-        first_flags = unsupported_terms(first, sources)
+        first_flags = _profile_flags(first, sources)
+        first_terms = unsupported_terms(first, sources)
+        first_pronouns = unsupported_pronouns(first, sources)
         problems = []
         if estimate_tokens(first) > limit or not first:
             words = len(first.split())
@@ -522,10 +572,15 @@ class ProfileWriter:
                 f" {self._policy.target_words} words: keep the most important statements"
                 " and drop the rest."
             )
-        if first_flags:
+        if first_terms:
             problems.append(
-                "It mentions " + ", ".join(first_flags) + ", which appear in none of the"
+                "It mentions " + ", ".join(first_terms) + ", which appear in none of the"
                 " statements. Use only names, places and numbers that appear in the statements."
+            )
+        if first_pronouns:
+            problems.append(
+                'It uses "' + '", "'.join(first_pronouns) + '", but no statement says whether'
+                " that person is a man or a woman. Use the person's name instead."
             )
         if not problems:
             return first, 1, first_flags
@@ -540,7 +595,11 @@ class ProfileWriter:
             ),
         ]
         second = plain_text(await complete_text(self._gateway, self._role, retry))
-        second_flags = unsupported_terms(second, sources)
+        second_flags = _profile_flags(second, sources)
         if not second or len(second_flags) > len(first_flags):
             return first or second, 2, first_flags if first else second_flags
         return second, 2, second_flags
+
+
+def _profile_flags(text: str, sources: list[str]) -> list[str]:
+    return unsupported_terms(text, sources) + unsupported_pronouns(text, sources)

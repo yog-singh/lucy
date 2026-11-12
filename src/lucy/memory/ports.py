@@ -19,7 +19,8 @@ Shared rules (see `graph_store` for the SQLite details):
   "now" comes from the store's clock.
 - Missing ids: getters return None or skip them; mutations raise
   `GraphNotFoundError`. Invalid references or dates raise `GraphStoreError` and
-  change nothing.
+  change nothing. Both errors, and `DERIVED_META_PREFIX`, are defined here so
+  code written against the interface never imports an implementation.
 - Vectors belong to one embedder (model and dimensions). Items without a
   vector for the current embedder are invisible to vector search until
   `reembed_missing` runs.
@@ -29,7 +30,7 @@ from __future__ import annotations
 
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from datetime import datetime
-from typing import Literal, Protocol, runtime_checkable
+from typing import Final, Literal, Protocol, runtime_checkable
 
 from lucy.core.ports import Embedder
 from lucy.memory.models import (
@@ -47,6 +48,25 @@ from lucy.memory.models import (
     StatementKind,
     VectorStatus,
 )
+
+#: `memory_meta` keys starting with this describe the graph's current contents
+#: (decay state, profile input hash, summary fingerprints, rejected merges); they
+#: are cleared by `reset_graph`. Other keys (e.g. when maintenance last ran) are kept.
+#: Part of the interface because callers choose their keys by it and every store's
+#: `reset_graph` must honour it.
+DERIVED_META_PREFIX: Final = "derived."
+
+
+class MemoryStoreError(RuntimeError):
+    """The memory store cannot do what was asked (duplicate event, bad schema, ...)."""
+
+
+class GraphStoreError(MemoryStoreError):
+    """A graph operation was invalid (bad reference, inconsistent dates, conflict...)."""
+
+
+class GraphNotFoundError(GraphStoreError, LookupError):
+    """A statement, entity or episode that a mutation refers to does not exist."""
 
 
 @runtime_checkable

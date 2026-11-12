@@ -10,10 +10,12 @@ The memory graph is active. After each turn, a background job extracts what the 
 
 Reflection is active: once a day it reads the user's recent messages for patterns no single turn shows and stores them as inferred habits and preferences, with the messages that support them; it also checks open goals and decisions against what the user said since. Inferred statements start uncertain, gain confidence each time new evidence appears, and lose it when the pattern stops (decay). Daily maintenance also refreshes entity summaries and merges duplicate entities. The profile is rewritten after new things are learned, once the conversation has been quiet for a minute, as well as daily. Background work pauses whenever Lucy is answering, and a job interrupted by exiting resumes next time.
 
+Voice works in its first stage: `lucy voice` listens through the microphone and answers aloud, half-duplex (see Voice below).
+
 Not built yet:
 
-- Voice (speech recognition and synthesis).
-- Tools.
+- Voice stages 2 and 3: interrupting Lucy by speaking (barge-in, with echo cancellation) and a wake word.
+- Tools that act (home control) and the confirmation flow for dangerous ones; the internet lookup tools below are built.
 - Telling Lucy in conversation to forget or correct something (use `lucy memory forget` and `lucy memory correct`).
 - Lucy asking the user to confirm an inference before acting on it.
 
@@ -58,6 +60,40 @@ If the model server cannot be reached or a model is missing, the error is shown 
 
 On exit, Lucy says how many background jobs are left; they resume at the next start, or with `lucy memory work`. Exiting never waits for them.
 
+## Voice
+
+`lucy voice` talks with Lucy through the microphone and speaker, in the same process and on the same conversation as `lucy chat` (session `cli` unless `--session` is given), so voice and text continue one conversation. Design: [`docs/voice.md`](docs/voice.md).
+
+What stage 1 does: Lucy listens; when you stop speaking (0.6 s of silence) your speech is transcribed and sent to her like a typed message; her reply is printed as in chat and spoken sentence by sentence as it is generated. While she thinks or speaks, and for 0.3 s afterwards, the microphone is ignored, so she never hears herself. Headphones are therefore not needed. What it does not do yet: you cannot interrupt her by speaking (press Enter instead), there is no echo cancellation, no wake word, and she waits for a whole sentence before speaking it.
+
+Setup:
+
+- Speech recognition is Parakeet TDT 0.6B v2, run in-process with MLX (Apple silicon). Its weights (2.5 GB) are downloaded from Hugging Face into `~/.cache/huggingface/hub` the first time `lucy voice` starts; after that no network is used.
+- Speech synthesis is `phonon` served by Ollama: `ollama pull phonon` (the Apache-2.0 build; `phonon:40m-en` is for non-commercial use only). `voice` under `[tts]` picks one of its voices; `default` is a good start.
+- Voice-activity detection is Silero VAD, shipped with Lucy.
+- `[stt]` and `[tts]` must be set as in `lucy.example.toml`; the optional `[voice]` section tunes listening (silence before Lucy answers, the ignored tail after she speaks, devices).
+- macOS asks for microphone access the first time. If it was refused, allow your terminal app under System Settings > Privacy & Security > Microphone and restart the terminal; Lucy warns when the microphone delivers only silence.
+- Memory: the chat model, Parakeet (about 1.7 GB) and phonon must fit together. With too little free memory, speech recognition slows from about 0.1 s to several seconds per utterance.
+
+```sh
+uv run lucy voice                    # talk; Enter stops Lucy, Ctrl-C or Ctrl-D quits
+uv run lucy voice --list-devices     # microphones and speakers
+```
+
+- Speak after `(listening)` appears. The state (listening, transcribing, thinking, speaking) is shown on the line below the conversation.
+- Enter while Lucy is thinking or speaking stops her at once. What she actually said is what the conversation keeps: the rest of her reply is dropped from the history.
+- Ctrl-C, Ctrl-D, or `q` then Enter quits, stopping audio immediately.
+- `input_device` / `output_device` under `[voice]` choose devices by number or part of the name from `--list-devices`; by default the system devices are used.
+- Each turn's latency (end of speech to first audio, by stage) is appended to `voice_timings.jsonl` beside the database, and logged with `--verbose`.
+
+File mode runs the same session over audio files instead of the devices, for tests and demos:
+
+```sh
+uv run lucy voice --input-wav question1.wav question2.wav --output-wav lucy.wav --wait-for-reply
+```
+
+The WAV files are played as the microphone in real time (`--fast` simulates time instead; latencies are then not real), and what Lucy says is written to `--output-wav`, aligned with the input's timeline. With `--wait-for-reply` each file is one turn, started once Lucy has answered the previous one; without it the files follow each other directly, as someone who does not wait for her would. The command exits once the input has ended and the last reply has been spoken.
+
 ## Memory commands
 
 `uv run lucy memory ACTION` inspects and controls what Lucy has learned. Every action takes `--config PATH` and `--verbose`. Statement and entity ids are printed as `#12`.
@@ -77,6 +113,30 @@ On exit, Lucy says how many background jobs are left; they resume at the next st
 Times are shown in local time with the time zone; a date given without a time (such as "since March") is shown as a date.
 
 Run `lucy memory work`, `correct`, `forget` and `rebuild` while `lucy chat` is not running on the same database.
+
+## Tools
+
+Lucy can look things up to ground her answers. Five read-only tools exist:
+
+- `wikipedia`: searches Wikipedia (in the language set under `[tools.wikipedia]`) and returns the best matching article's introduction and the titles of other matches. A name with several meanings is flagged as ambiguous.
+- `web_search`: queries your own [SearXNG](https://docs.searxng.org/) instance and returns the top results with title, address, snippet and date when there is one. With `recent` set, the model asks for news articles only (SearXNG's news category).
+- `fetch_page`: reads one web page and returns its title and main text, without scripts, styles, menus or markup.
+- `time`: the date and time in a named city, country or time zone, worked out from this machine's time-zone database, with the difference from your local time; it can also convert a clock time ("9am here"). It sends nothing off the machine.
+- `weather`: current conditions and a daily forecast (today and the next two days by default, up to seven) for a named place, from [Open-Meteo](https://open-meteo.com/) (no account or key; free for non-commercial use, data under CC BY 4.0). Metric by default; `units = "imperial"` under `[tools.weather]` switches to °F, mph and inches.
+
+They are off by default. Enable them in `lucy.toml` (the example file documents every option):
+
+```toml
+[tools]
+enabled = ["wikipedia", "web_search", "fetch_page", "time", "weather"]
+
+[tools.web_search]
+searxng_url = "http://127.0.0.1:8890"
+```
+
+Enabling the network tools sends data off this machine: the search query goes to Wikipedia, or to your SearXNG instance and from there to the search engines it queries; `fetch_page` requests the page address the model chose from that site; `weather` sends the place name to Open-Meteo's geocoding service and the place's coordinates, rounded to two decimals (about a kilometre), to its forecast service. `time` sends nothing. Requests carry a generic `User-Agent` and nothing about you. `weather` never guesses where you are: for "around me" Lucy passes the place she knows you live in, or asks. `deploy/searxng/` runs a private SearXNG on `127.0.0.1:8890` with Docker; its README explains how to start, test, update and stop it. When tools are enabled, the system prompt gets a short guide on when to use them (`src/lucy/prompts/tools.md`), and `lucy chat` shows what is being looked up while a tool runs, such as `[looking up "Mount Kilimanjaro" on wikipedia]` or `[checking the weather in Porto]`. Every result is capped at about 6,000 characters (`max_chars`), and each network call is limited to 10 seconds (`timeout`).
+
+`fetch_page` treats page content as untrusted. It fetches only `http` and `https` addresses without a user name or password. The host must resolve only to public IP addresses: loopback, private, link-local and other internal ranges are refused for IPv4 and IPv6, and so are names like `localhost`. The tool connects to the address it checked and checks every redirect again. Bodies are limited in size (2 MB, enforced while downloading), in type (text only) and in time. To let it reach a host on your network, such as a local Home Assistant, add the host to `allow_private_hosts` under `[tools.fetch_page]`.
 
 ## Memory eval
 
@@ -102,7 +162,7 @@ uv run pytest
 uv run pytest -m live
 ```
 
-The default run uses scripted fakes and needs no models. `-m live` runs the tests that talk to a real local Ollama server.
+The default run uses scripted fakes and recorded responses and needs no models, network or sound devices. `-m live` runs the tests that talk to a real local Ollama server, Wikipedia, a web page and the local SearXNG instance (skipped when it is not running), and the speech tests (phonon on Ollama, Parakeet and Silero VAD; they never open the microphone or speaker).
 
 ## Documentation
 

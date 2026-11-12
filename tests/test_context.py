@@ -1,3 +1,5 @@
+from datetime import UTC, datetime, timedelta, timezone
+
 import pytest
 from pydantic import ValidationError
 
@@ -8,6 +10,7 @@ from lucy.core.context import (
     ContextBudgets,
     ContextBuilder,
     SectionReport,
+    date_line,
     estimate_tokens,
 )
 from lucy.core.types import MemoryContext, Message, Role, ToolCall
@@ -161,4 +164,54 @@ def test_latest_user_message_is_always_kept() -> None:
     assert built.messages[1:] == [history[-1]]
     assert by_name(built.report)["history"] == SectionReport(
         name="history", tokens=1000, included=1, dropped=2
+    )
+
+
+IST = timezone(timedelta(hours=5, minutes=30), "IST")
+
+
+def test_date_line_names_the_time_zone_and_offset() -> None:
+    assert date_line(datetime(2026, 11, 12, 11, 42, tzinfo=IST)) == (
+        "Today is Thursday, 12 November 2026, 11:42 IST (UTC+05:30)."
+    )
+    est = timezone(timedelta(hours=-5), "EST")
+    assert (
+        date_line(datetime(2027, 1, 3, 7, 5, tzinfo=est))
+        == "Today is Sunday, 3 January 2027, 07:05 EST (UTC-05:00)."
+    )
+    nepal = timezone(timedelta(hours=5, minutes=45))  # no abbreviation: offset only
+    assert date_line(datetime(2026, 11, 12, 11, 42, tzinfo=nepal)).endswith("11:42 (UTC+05:45).")
+    assert date_line(datetime(2026, 11, 12, 6, 12, tzinfo=UTC)).endswith("06:12 (UTC+00:00).")
+    odd = timezone(timedelta(hours=-3), "-03")  # numeric "names" are not repeated
+    assert date_line(datetime(2026, 11, 12, 3, 12, tzinfo=odd)).endswith("03:12 (UTC-03:00).")
+
+
+def test_date_line_without_a_time_zone_says_local_time() -> None:
+    assert date_line(datetime(2026, 11, 12, 11, 42)) == (
+        "Today is Thursday, 12 November 2026, 11:42 (local time)."
+    )
+
+
+def test_clock_adds_the_current_date_after_the_persona_on_every_build() -> None:
+    now = [datetime(2026, 11, 12, 23, 59, tzinfo=IST)]
+    builder = ContextBuilder("You are Lucy.", count_tokens=words, clock=lambda: now[0])
+    first = builder.build(memory=MemoryContext(), history=[user("hi")], context_window=100)
+    now[0] = datetime(2026, 11, 13, 0, 1, tzinfo=IST)
+    second = builder.build(memory=MemoryContext(), history=[user("hi")], context_window=100)
+    assert first.messages[0].content == (
+        "You are Lucy.\n\nToday is Thursday, 12 November 2026, 23:59 IST (UTC+05:30)."
+    )
+    assert "Friday, 13 November 2026, 00:01" in second.messages[0].content
+    # The date line is counted with the persona, in the budgets and the report.
+    assert by_name(first.report)["persona"].tokens == words(first.messages[0].content)
+    plain = ContextBuilder("You are Lucy.", count_tokens=words)
+    assert (
+        plain.token_budgets(100, reserve_output=0)["history"]
+        > builder.token_budgets(100, reserve_output=0)["history"]
+    )
+    assert (
+        plain.build(memory=MemoryContext(), history=[user("hi")], context_window=100)
+        .messages[0]
+        .content
+        == "You are Lucy."
     )

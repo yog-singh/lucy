@@ -1,0 +1,166 @@
+{
+ "query": "Apple Inc",
+ "results": [
+  {
+   "title": "Apple Inc. | History, Products, & Headquarters | Britannica Money",
+   "content": "Founded by Steve Jobs and Steve Wozniak in 1976, Apple set new benchmarks in product innovation, user-centric functionality, aesthetics and design, and ...",
+   "url": "https://www.britannica.com/money/Apple-Inc",
+   "engine": "google cse",
+   "engines": [
+    "google cse"
+   ],
+   "positions": [
+    4
+   ],
+   "score": 0.25,
+   "publishedDate": null,
+   "category": "general",
+   "template": "default.html"
+  },
+  {
+   "title": "Apple Inc Company Profile - Apple Inc Overview - GlobalData",
+   "content": "Related keylists ... Apple Inc (Apple) designs, manufactures, and markets smartphones, tablets, personal computers, and wearable devices. The company offers ...",
+   "url": "https://www.globaldata.com/company-profile/apple-inc/",
+   "engine": "google cse",
+   "engines": [
+    "google cse"
+   ],
+   "positions": [
+    6
+   ],
+   "score": 0.16666666666666666,
+   "publishedDate": null,
+   "category": "general",
+   "template": "default.html"
+  },
+  {
+   "title": "Apple Inc. | Computer Science | Research Starters - EBSCO",
+   "content": "In 2007, Apple Computer changed its name to Apple Inc., reflecting a shift from creating primarily personal computing devices to providing a full line of ...",
+   "url": "https://www.ebsco.com/research-starters/computer-science/apple-inc/",
+   "engine": "google cse",
+   "engines": [
+    "google cse"
+   ],
+   "positions": [
+    9
+   ],
+   "score": 0.1111111111111111,
+   "publishedDate": null,
+   "category": "general",
+   "template": "default.html"
+  },
+  {
+   "title": "Apple Inc. - AnnualReports.com",
+   "content": "Most Recent Annual Report. Apple Inc. ... Apple Inc. does not currently have any hardcopy reports on AnnualReports.com. Click the button below to request a report ...",
+   "url": "https://www.annualreports.com/Company/apple-inc",
+   "engine": "google cse",
+   "engines": [
+    "google cse"
+   ],
+   "positions": [
+    10
+   ],
+   "score": 0.1,
+   "publishedDate": null,
+   "category": "general",
+   "template": "default.html"
+  }
+ ],
+ "answers": [],
+ "corrections": [],
+ "infoboxes": [
+  {
+   "infobox": "Apple Inc.",
+   "id": "https://en.wikipedia.org/wiki/Apple_Inc.",
+   "content": "Apple Inc. is an American multinational technology company headquartered in Cupertino, California, in Silicon Valley, and known for consumer electronics, software and online services. Founded in 1976 as Apple Computer Company by Steve Jobs, Steve Wozniak and Ronald Wayne, the company was incorporated by Jobs and Wozniak as Apple Computer, Inc. the following year. Its current name was adopted in 2007 as the company expanded its focus from computers to consumer electronics. Apple is one of the Big Tech companies.",
+   "urls": [
+    {
+     "title": "Wikipedia",
+     "url": "https://en.wikipedia.org/wiki/Apple_Inc."
+    },
+    {
+     "title": "Official website",
+     "url": "https://apple.com/hu/",
+     "official": true
+    },
+    {
+     "title": "YouTube",
+     "url": "https://www.youtube.com/channel/UCE_M8A5yxnLfW0KghEeajjw"
+    },
+    {
+     "title": "Twitter",
+     "url": "https://twitter.com/Apple"
+    },
+    {
+     "title": "Facebook",
+     "url": "https://facebook.com/apple"
+    },
+    {
+     "title": "Instagram",
+     "url": "https://www.instagram.com/apple"
+    },
+    {
+     "title": "Lemmy",
+     "url": "https://lemmy.world/c/apple_enthusiast"
+    },
+    {
+     "title": "Wikidata",
+     "url": "http://www.wikidata.org/entity/Q312"
+    }
+   ],
+   "attributes": [
+    {
+     "label": "Inception",
+     "value": "Thursday, April 1, 1976",
+     "entity": "P571"
+    },
+    {
+     "label": "Country of origin",
+     "value": "United States",
+     "entity": "P495"
+    },
+    {
+     "label": "Country",
+     "value": "United States",
+     "entity": "P17"
+    },
+    {
+     "label": "Headquarters location",
+     "value": "Cupertino",
+     "entity": "P159"
+    },
+    {
+     "label": "Chief executive officer",
+     "value": "Q106028933",
+     "entity": "P169"
+    },
+    {
+     "label": "Founder",
+     "value": "Q332591, Steve Wozniak, Steve Jobs",
+     "entity": "P112"
+    },
+    {
+     "label": "Legal form",
+     "value": "corporation",
+     "entity": "P1454"
+    }
+   ],
+   "engine": "wikidata",
+   "engines": [
+    "wikidata",
+    "wikipedia"
+   ]
+  }
+ ],
+ "suggestions": [],
+ "unresponsive_engines": [
+  [
+   "brave",
+   "Suspended: too many requests"
+  ],
+  [
+   "duckduckgo",
+   "CAPTCHA"
+  ]
+ ]
+}

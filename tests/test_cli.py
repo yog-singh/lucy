@@ -6,10 +6,12 @@ from collections.abc import AsyncIterator, Iterator, Sequence
 from pathlib import Path
 
 import pytest
+from prompt_toolkit.input import create_pipe_input
+from prompt_toolkit.output import DummyOutput
 
 from lucy.app import LucyApp
 from lucy.clients import cli
-from lucy.clients.cli import ChatLoop, StdinReader
+from lucy.clients.cli import ChatLoop, ReadLine, StdinReader, TerminalReader
 from lucy.core.config import AdapterConfig, LLMSettings, Settings
 from lucy.core.events import AssistantMessage, TurnEnded
 from lucy.core.registry import Registry
@@ -63,7 +65,9 @@ class Harness:
         self.out = io.StringIO()
         self.err = io.StringIO()
 
-    def chat(self, read_line: ScriptedInput, *, echo_input: bool = False) -> ChatLoop:
+    def chat(
+        self, read_line: ReadLine, *, echo_input: bool = False, reader_prompts: bool = False
+    ) -> ChatLoop:
         return ChatLoop(
             self.app,
             "cli",
@@ -71,6 +75,7 @@ class Harness:
             out=self.out,
             err=self.err,
             echo_input=echo_input,
+            reader_prompts=reader_prompts,
         )
 
 
@@ -171,8 +176,61 @@ async def test_tool_activity_goes_to_stderr(make_harness) -> None:
         ]
     )
     assert await run(h.chat(ScriptedInput(["weather?"]))) == 0
-    assert "[using weather]" in h.err.getvalue()
-    assert "lucy> No weather tool yet.\n" in h.out.getvalue()
+    assert "[using weather]\n" in h.err.getvalue()
+    # The marker goes on its own line: the reply starts on the line after it.
+    assert "lucy> \nNo weather tool yet.\n" in h.out.getvalue()
+
+
+async def test_tool_marker_after_text_starts_a_new_line(make_harness) -> None:
+    call = ToolCall(id="c1", name="wikipedia", arguments={"query": "Piranesi"})
+    h = await make_harness(
+        [
+            [
+                LLMChunk(text="Let me check."),
+                LLMChunk(tool_call=call),
+                LLMChunk(finish_reason=FinishReason.TOOL_CALLS),
+            ],
+            reply("Susanna Clarke."),
+        ]
+    )
+    assert await run(h.chat(ScriptedInput(["who?"]))) == 0
+    assert '[looking up "Piranesi" on wikipedia]\n' in h.err.getvalue()
+    assert "lucy> Let me check.\nSusanna Clarke.\n" in h.out.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments", "marker"),
+    [
+        (
+            "wikipedia",
+            {"query": "Mount Kilimanjaro"},
+            '[looking up "Mount Kilimanjaro" on wikipedia]',
+        ),
+        (
+            "web_search",
+            {"query": "UN secretary-general"},
+            '[searching the web for "UN secretary-general"]',
+        ),
+        ("fetch_page", {"url": "https://example.com/a/b?c=1"}, "[reading example.com]"),
+        ("fetch_page", {"url": "not a url"}, "[reading a web page]"),
+        ("fetch_page", {}, "[reading a web page]"),
+        ("wikipedia", {}, "[using wikipedia]"),
+        ("time", {"place": "Tokyo"}, "[checking the time in Tokyo]"),
+        ("time", {"place": " New\nYork ", "at": "9am"}, "[checking the time in New York]"),
+        ("time", {}, "[using time]"),
+        ("weather", {"place": "Porto", "days": 2}, "[checking the weather in Porto]"),
+        ("weather", {"days": 2}, "[using weather]"),
+        ("lights", {"level": 3, "room": "hall"}, '[using lights: "hall"]'),
+        ("lights", {}, "[using lights]"),
+        (
+            "web_search",
+            {"query": "a\nb  " + "x" * 100},
+            '[searching the web for "a b ' + "x" * 55 + '…"]',
+        ),
+    ],
+)
+def test_tool_marker(name: str, arguments: dict[str, object], marker: str) -> None:
+    assert cli.tool_marker(ToolCall(id="c", name=name, arguments=arguments)) == marker
 
 
 async def test_interrupt_while_streaming(make_harness) -> None:
@@ -226,6 +284,95 @@ async def test_stdin_reader_splits_lines_and_signals_end(tmp_path: Path) -> None
             os.close(write_fd)
         os.close(read_fd)
     assert lines == ["one", "two", "", "café no newline", None, None]
+
+
+# --- Line editing at a terminal (TerminalReader) ------------------------------------
+
+LEFT, RIGHT, UP, HOME, END, BACKSPACE = "\x1b[D", "\x1b[C", "\x1b[A", "\x01", "\x05", "\x7f"
+
+
+async def read_typed(reader: TerminalReader, pipe, keys: str) -> str | None:
+    pipe.send_text(keys)
+    async with asyncio.timeout(TIMEOUT):
+        return await reader.readline()
+
+
+async def test_terminal_reader_applies_cursor_moves_and_backspace(tmp_path: Path) -> None:
+    with create_pipe_input() as pipe:
+        reader = TerminalReader(input=pipe, output=DummyOutput())
+        keys = f"I lkk{BACKSPACE}e tea{HOME}{RIGHT * 3}i{END} a lot{LEFT * 3}{BACKSPACE}\r"
+        assert await read_typed(reader, pipe, keys) == "I like tea alot"
+
+
+async def test_terminal_reader_ctrl_d_and_ctrl_c_end_input() -> None:
+    with create_pipe_input() as pipe:
+        reader = TerminalReader(input=pipe, output=DummyOutput())
+        assert await read_typed(reader, pipe, "\x04") is None  # Ctrl-D on an empty line
+        assert await read_typed(reader, pipe, "half typed\x03") is None  # Ctrl-C
+        assert await read_typed(reader, pipe, "still works\r") == "still works"
+
+
+async def test_terminal_reader_history_is_kept_across_runs(tmp_path: Path) -> None:
+    history = tmp_path / "data" / "chat_history"  # the directory is created
+    with create_pipe_input() as pipe:
+        reader = TerminalReader(history_file=history, input=pipe, output=DummyOutput())
+        assert await read_typed(reader, pipe, "first line\r") == "first line"
+        assert await read_typed(reader, pipe, "second line\r") == "second line"
+        assert await read_typed(reader, pipe, f"{UP}{UP}\r") == "first line"
+    with create_pipe_input() as pipe:  # a new run reads the same file
+        reader = TerminalReader(history_file=history, input=pipe, output=DummyOutput())
+        assert await read_typed(reader, pipe, f"{UP} again\r") == "first line again"
+
+
+async def test_terminal_reader_without_a_usable_history_file_still_reads(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    blocker = tmp_path / "a_file"
+    blocker.write_text("")
+    with create_pipe_input() as pipe:
+        reader = TerminalReader(
+            history_file=blocker / "chat_history", input=pipe, output=DummyOutput()
+        )
+        assert await read_typed(reader, pipe, "hello\r") == "hello"
+        assert await read_typed(reader, pipe, f"{UP}!\r") == "hello!"  # in-memory history
+    assert "cannot use the history file" in caplog.text
+
+
+async def test_chat_with_a_prompting_reader_writes_no_prompt(make_harness) -> None:
+    h = await make_harness([reply("Hi there.")])
+    assert await run(h.chat(ScriptedInput(["hello"]), reader_prompts=True)) == 0
+    # The reader draws "you> " and ends its own line, also on Ctrl-D / Ctrl-C.
+    assert h.out.getvalue() == "lucy> Hi there.\n"
+
+
+async def test_chat_over_a_terminal_reader_end_to_end(make_harness) -> None:
+    h = await make_harness([reply("Noted."), reply("Again.")])
+    with create_pipe_input() as pipe:
+        reader = TerminalReader(input=pipe, output=DummyOutput())
+        pipe.send_text("helo{LEFT}{LEFT}l\r".replace("{LEFT}", LEFT))
+        chat = h.chat(reader.readline, reader_prompts=True)
+        async with asyncio.timeout(TIMEOUT):
+            task = asyncio.create_task(chat.run())
+            while len(h.llm.calls) < 1:
+                await asyncio.sleep(0.01)
+            pipe.send_text(f"{UP}\r")
+            while len(h.llm.calls) < 2:
+                await asyncio.sleep(0.01)
+            pipe.send_text("\x04")
+            assert await task == 0
+    texts = [
+        e.text for e in await h.app.memory.recent_episodes("cli", 20) if e.type == "user_message"
+    ]
+    assert texts == ["hello", "hello"]
+    assert h.out.getvalue() == "lucy> Noted.\nlucy> Again.\n"
+
+
+def test_chat_history_lives_beside_the_database(tmp_path: Path) -> None:
+    llm = LLMSettings(roles={"chat": AdapterConfig(adapter="fake")})
+    db = tmp_path / "x" / "lucy.db"
+    with_db = Settings(llm=llm, memory=AdapterConfig(adapter="sqlite", options={"path": str(db)}))
+    assert cli.chat_history_path(with_db) == tmp_path / "x" / "chat_history"
+    assert cli.chat_history_path(Settings(llm=llm)) == Path("data") / "chat_history"
 
 
 def test_missing_default_config_exits_2(

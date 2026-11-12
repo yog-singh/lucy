@@ -22,6 +22,7 @@ from lucy.memory.profile import (
     plain_text,
     select_profile_input,
     truncate_to_tokens,
+    unsupported_pronouns,
     unsupported_terms,
 )
 from tests.fakes import FakeLLM, Pause
@@ -186,8 +187,9 @@ async def test_input_is_capped_by_the_token_budget_round_robin(
 # --- Writing --------------------------------------------------------------------
 
 GOOD = (
-    "Yogesh lives in Bangalore. His sister Priya lives in Pune, and his friend is Rahul. "
-    "He is building Lucy and wants to ship the voice loop by January. He prefers short answers."
+    "Yogesh lives in Bangalore. Yogesh's sister Priya lives in Pune, and Yogesh's friend is "
+    "Rahul. Yogesh is building Lucy and wants to ship the voice loop by January. Yogesh "
+    "prefers short answers."
 )
 
 
@@ -295,7 +297,7 @@ async def test_invented_names_are_flagged_and_retried(
     w, _ = writer(graph, clock, [reply(invented), reply(invented)])
     with caplog.at_level(logging.WARNING, logger="lucy.memory.profile"):
         result = await w.rewrite(force=True)
-    assert result.flagged == ["Anita", "Google", "2019"]
+    assert result.flagged == ["Anita", "Google", "2019", "his"]
     assert result.profile is not None and result.profile.content == invented
     assert "Anita" in caplog.text
 
@@ -335,6 +337,33 @@ def test_unsupported_terms() -> None:
     )
     assert unsupported_terms(text, sources) == ["Rahul", "2020", "Google"]
     assert unsupported_terms("", sources) == []
+
+
+async def test_a_gender_no_statement_gives_is_flagged_and_retried(
+    graph: SQLiteGraphStore, clock: Clock
+) -> None:
+    await populate(graph)  # nothing says whether Yogesh is a man or a woman
+    guessed = "Yogesh lives in Bangalore. He prefers short answers, and his sister is Priya."
+    w, llm = writer(graph, clock, [reply(guessed), reply(GOOD)])
+    result = await w.rewrite()
+    assert result.attempts == 2 and result.flagged == []
+    assert result.profile is not None and result.profile.content == GOOD
+    assert '"he", "his"' in llm.calls[1][-1].content and "name" in llm.calls[1][-1].content
+
+    w, _ = writer(graph, clock, [reply(guessed), reply(guessed)])
+    assert (await w.rewrite(force=True)).flagged == ["he", "his"]
+
+
+def test_unsupported_pronouns() -> None:
+    sources = ["Sam lives in Leeds", "Sam's sister is Priya", "Priya works as a doctor"]
+    # "sister" establishes a woman, so "she"/"her" pass; nothing establishes a man.
+    text = "Sam lives in Leeds. His sister Priya is a doctor; she loves her work. He walks."
+    assert unsupported_pronouns(text, sources) == ["his", "he"]
+    assert unsupported_pronouns("Sam lives in Leeds.", sources) == []
+    assert unsupported_pronouns("He lives in Leeds.", ["Sam's husband is Tom"]) == []
+    assert unsupported_pronouns("He said his piece.", ["Sam said he would come"]) == []
+    assert unsupported_pronouns("She and he.", ["Sam lives in Leeds"]) == ["she", "he"]
+    assert unsupported_pronouns("The theme here.", []) == []  # whole words only
 
 
 def test_truncate_to_tokens() -> None:

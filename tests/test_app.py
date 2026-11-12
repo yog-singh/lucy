@@ -95,6 +95,30 @@ async def test_conversation_survives_a_restart(tmp_path: Path) -> None:
     assert trace is not None and trace.steps[0].messages == messages
 
 
+async def test_a_fallback_is_recorded_in_the_turn_trace(tmp_path: Path) -> None:
+    db = tmp_path / "lucy.db"
+    # One fake serves both roles: the chat attempt is silent, the fallback answers.
+    llm = FakeLLM([[LLMChunk(finish_reason=FinishReason.LENGTH)], reply("Recovered.")])
+    roles = {
+        "chat": {"adapter": "fake", "model": "m", "fallback": "chat_deep"},
+        "chat_deep": {"adapter": "fake", "model": "m", "extra": {"reasoning_effort": "low"}},
+    }
+    settings = Settings(
+        llm=LLMSettings.model_validate({"roles": roles}),
+        memory=AdapterConfig(adapter="sqlite", options={"path": str(db)}),
+    )
+    async with LucyApp(settings, registry=make_registry(llm)) as app:
+        events = await run_turn(app, "Hello?")
+    assert text_of(events) == "Recovered."
+    async with SQLiteMemoryStore(db) as store:
+        trace = await store.get_trace(events[-1].turn_id or "")
+    assert trace is not None and trace.outcome == "completed"
+    [step] = trace.steps
+    assert step.role == "chat" and step.fallback is not None
+    assert step.fallback.served_by == "chat_deep"
+    assert step.fallback.reason.startswith("ended without output")
+
+
 async def test_stop_is_idempotent_and_closes_everything(tmp_path: Path) -> None:
     llm = FakeLLM([])
     app = LucyApp(make_settings(tmp_path / "lucy.db"), registry=make_registry(llm))

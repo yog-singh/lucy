@@ -55,7 +55,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable, Mapping
+import re
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from types import MappingProxyType, TracebackType
@@ -68,11 +69,12 @@ from lucy.core.bus import EventBus, Subscription
 from lucy.core.config import AdapterConfig, Settings
 from lucy.core.context import ContextBuilder
 from lucy.core.events import TurnEnded
-from lucy.core.gateway import LLMGateway, Preempted
+from lucy.core.gateway import LLMGateway, Preempted, add_fallbacks
 from lucy.core.jobs import Handler, Job, JobRunner, JobStatus, utc_now
 from lucy.core.orchestrator import Orchestrator
-from lucy.core.ports import Embedder, MemoryStore, TraceSink
+from lucy.core.ports import STT, TTS, Embedder, MemoryStore, Tool, TraceSink
 from lucy.core.registry import Registry
+from lucy.core.trace import TurnTrace
 from lucy.core.types import MemoryContext
 from lucy.memory.decay import DecayPolicy
 from lucy.memory.extraction import (
@@ -104,6 +106,7 @@ from lucy.memory.retrieval import Retriever
 from lucy.memory.sqlite_jobs import SQLiteJobStore
 from lucy.memory.sqlite_store import SQLiteMemoryStore
 from lucy.prompts import load_prompt
+from lucy.tools import build_tools
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +114,8 @@ BUILTIN_ADAPTER_MODULES: Final = (
     "lucy.adapters.llm_openai_compat",
     "lucy.adapters.embed_openai_compat",
     "lucy.memory.sqlite_store",
+    "lucy.adapters.stt_parakeet_mlx",  # imports MLX only when a model is loaded
+    "lucy.adapters.tts_openai_compat",
 )
 """Modules imported at startup so their adapters register themselves."""
 
@@ -133,6 +138,36 @@ rewritten (with `background`; see the module docstring)."""
 
 TRANSIENT_JOB_ERRORS: Final = (*DEFAULT_TRANSIENT_ERRORS, LLMError, EmbedderError)
 """Errors that never make extraction skip a turn (a server outage says nothing about it)."""
+
+
+_NAMED_TOOL: Final = re.compile(r"\bthe (\w+) tool\b")
+
+
+def system_prompt(tools: bool | Collection[str]) -> str:
+    """The fixed part of the system prompt: the persona, plus the tool guidance
+    (`prompts/tools.md`) when any tool is enabled.
+
+    `tools` is whether tools are enabled, or the names of the enabled tools: then a
+    guidance sentence about "the weather tool" (any "the NAME tool") is left out when
+    that tool is not enabled. Measured: with the weather sentence present but the tool
+    disabled, the model called a `weather` tool it was not offered.
+    """
+    persona = load_prompt("persona").strip()
+    if not tools:
+        return persona
+    guidance = load_prompt("tools").strip()
+    if not isinstance(tools, bool):
+        enabled = set(tools)
+
+        def keep(sentence: str) -> bool:
+            return all(name in enabled for name in _NAMED_TOOL.findall(sentence))
+
+        paragraphs = [
+            " ".join(s for s in re.split(r"(?<=[.!?])\s+", paragraph) if keep(s))
+            for paragraph in guidance.split("\n\n")
+        ]
+        guidance = "\n\n".join(p for p in paragraphs if p)
+    return f"{persona}\n\n{guidance}"
 
 
 @dataclass(frozen=True)
@@ -185,6 +220,20 @@ class _GuardedRetriever:
         )
 
 
+class _FallbackTraces:
+    """A trace sink that records each step's LLM fallback (`gateway.add_fallbacks`).
+
+    The orchestrator records a turn's trace in the task that ran the turn, which
+    is where the gateway noted the fallbacks its streams took.
+    """
+
+    def __init__(self, sink: TraceSink) -> None:
+        self._sink = sink
+
+    async def record(self, trace: TurnTrace) -> None:
+        await self._sink.record(add_fallbacks(trace))
+
+
 def _describe(exc: BaseException, timeout: float) -> str:
     if isinstance(exc, TimeoutError):
         return f"timed out after {timeout:g}s"
@@ -206,6 +255,16 @@ class LucyApp:
     `clock` is "now" for the memory components (see the module docstring);
     `profile_delay` is the quiet period before a profile rewrite after
     extraction (default `PROFILE_DELAY` with `background`, else 0).
+    `tool_builder` builds the chat model's tools from the settings (default
+    `lucy.tools.build_tools` with the app's `clock`: the tools in `[tools]
+    enabled`, none by default);
+    tests pass one that injects a mock HTTP transport. With no tools, no tool
+    specs are offered and the system prompt is the persona alone.
+
+    `speech=True` (for `lucy voice`) also builds the `[stt]` and `[tts]`
+    adapters and warms them up during `start` (loading the speech recogniser,
+    asking the TTS for a word), and closes them on `stop`; they are then
+    `stt` and `tts`. Without it no speech adapter is created or loaded.
 
     An app is started at most once. `stop` is idempotent, also safe after a
     failed `start`, and leaves nothing running: background requests stop
@@ -224,8 +283,15 @@ class LucyApp:
         runner_options: Mapping[str, Any] | None = None,
         clock: Callable[[], datetime] = utc_now,
         profile_delay: float | None = None,
+        tool_builder: Callable[[Settings], Sequence[Tool]] | None = None,
+        speech: bool = False,
     ) -> None:
         self.settings = settings
+        self._speech = speech
+        self._stt: STT | None = None
+        self._tts: TTS | None = None
+        self._tool_builder = tool_builder or (lambda s: build_tools(s, clock=clock))
+        self._tools: list[Tool] = []
         self._registry = registry
         self._background = background
         self._retrieval_timeout = retrieval_timeout
@@ -378,26 +444,67 @@ class LucyApp:
 
             await self._start_learning(create)
 
-            trace = memory if isinstance(memory, TraceSink) else None
-            context = ContextBuilder(load_prompt("persona"))
+            trace = _FallbackTraces(memory) if isinstance(memory, TraceSink) else None
+            self._tools = list(self._tool_builder(self.settings))
+            clock = self._clock
+            context = ContextBuilder(
+                system_prompt([t.name for t in self._tools]),
+                clock=lambda: clock().astimezone(),
+                layout=self.settings.context.layout,
+            )
             self._orchestrator = Orchestrator(
                 bus=self._bus,
                 gateway=self._gateway,
                 memory=memory,
                 context=context,
+                tools=self._tools,
                 trace=trace,
             )
             self._run_task = asyncio.create_task(self._orchestrator.run(), name="lucy-orchestrator")
             if self._background and self.learning_active:
                 self._start_background()
+            if self._speech:
+                await self._start_speech(create)
         except BaseException:
             await self.stop()
             raise
         logger.info(
-            "Lucy started (LLM roles: %s; memory learning: %s)",
+            "Lucy started (LLM roles: %s; memory learning: %s; tools: %s)",
             ", ".join(self._gateway.roles()),
             "active" if self.learning_active else f"off, {self._learning_off}",
+            ", ".join(tool.name for tool in self._tools) or "none",
         )
+
+    @property
+    def stt(self) -> STT:
+        """The speech recogniser. Available after `start` with `speech=True`."""
+        if self._stt is None:
+            raise RuntimeError("speech is not running; create the app with speech=True")
+        return self._stt
+
+    @property
+    def tts(self) -> TTS:
+        """The speech synthesiser. Available after `start` with `speech=True`."""
+        if self._tts is None:
+            raise RuntimeError("speech is not running; create the app with speech=True")
+        return self._tts
+
+    async def _start_speech(self, create: Callable[..., Any]) -> None:
+        """Create the STT and TTS adapters and warm both up (concurrently)."""
+        stt_config, tts_config = self.settings.stt, self.settings.tts
+        missing = [name for name, c in (("[stt]", stt_config), ("[tts]", tts_config)) if c is None]
+        if missing:
+            raise ValueError(
+                f"voice needs {' and '.join(missing)} in the settings (see lucy.example.toml)"
+            )
+        assert stt_config is not None and tts_config is not None
+        self._stt = create("stt", stt_config.adapter, **stt_config.options)
+        if not isinstance(self._stt, STT):
+            raise TypeError(f"stt adapter {stt_config.adapter!r} is not an STT")
+        self._tts = create("tts", tts_config.adapter, **tts_config.options)
+        if not isinstance(self._tts, TTS):
+            raise TypeError(f"tts adapter {tts_config.adapter!r} is not a TTS")
+        await asyncio.gather(_warm_up(self._stt), _warm_up(self._tts))
 
     def _learning_blocker(self) -> str | None:
         """Which piece learning lacks, or None if it can be wired in."""
@@ -586,6 +693,13 @@ class LucyApp:
                     if id(llm) not in closed:
                         closed.add(id(llm))
                         await _close_quietly(llm, "aclose")
+            tools, self._tools = self._tools, []
+            for tool in tools:
+                await _close_quietly(tool, "aclose")
+            stt, tts, self._stt, self._tts = self._stt, self._tts, None, None
+            for speech in (stt, tts):
+                if speech is not None:
+                    await _close_quietly(speech, "aclose")
             memory, self._memory = self._memory, None
             if memory is not None:
                 await _close_quietly(memory, "close")
@@ -626,6 +740,13 @@ class LucyApp:
         tb: TracebackType | None,
     ) -> None:
         await self.stop()
+
+
+async def _warm_up(component: Any) -> None:
+    """Await `component.warm_up()` if it has one."""
+    warm_up = getattr(component, "warm_up", None)
+    if warm_up is not None:
+        await warm_up()
 
 
 async def _close_quietly(component: Any, method: str) -> None:

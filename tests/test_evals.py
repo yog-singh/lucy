@@ -16,10 +16,17 @@ from typing import Any
 import pytest
 
 from lucy.clients import cli
+from lucy.core.config import Settings
 from lucy.core.events import UserMessage
 from lucy.evals import command, report
 from lucy.evals.matching import Match, has_keyword
-from lucy.evals.runner import CheckResult, ScenarioResult, ScenarioRunner, find_everywhere
+from lucy.evals.runner import (
+    CheckResult,
+    ScenarioResult,
+    ScenarioRunner,
+    find_everywhere,
+    settings_for,
+)
 from lucy.evals.scenario import (
     CATEGORIES,
     START,
@@ -276,6 +283,23 @@ async def test_runner_records_errors(tmp_path: Path) -> None:
     result = await run(tmp_path, scn, models)
     assert result.error is not None and "turn ended with error" in result.error
     assert not result.passed and result.checks == []
+
+
+def test_eval_settings_turn_tools_off(tmp_path: Path) -> None:
+    settings = Settings.model_validate(
+        {
+            "llm": {"roles": {"chat": {"adapter": "ollama", "model": "m"}}},
+            "memory": {"adapter": "sqlite", "path": "data/lucy.db"},
+            "tools": {
+                "enabled": ["wikipedia", "web_search"],
+                "web_search": {"searxng_url": "http://127.0.0.1:8890"},
+            },
+        }
+    )
+    copy = settings_for(settings, tmp_path / "eval.db")
+    assert copy.tools.enabled == []
+    assert copy.memory is not None and copy.memory.options == {"path": str(tmp_path / "eval.db")}
+    assert settings.tools.enabled == ["wikipedia", "web_search"]  # the original is untouched
 
 
 def test_find_everywhere_skips_index_internals(tmp_path: Path) -> None:

@@ -1,10 +1,26 @@
 """Assembling the prompt for one turn from named, budgeted sections (ADR 0004).
 
 The usable window is the model's context window minus the tokens reserved for
-the reply and minus the persona, which is always included in full. Each other
-section gets a fixed fraction of the usable window (`ContextBudgets`). The
-default fractions leave some slack for tool schemas and per-message overhead,
-which are not counted.
+the reply and minus the persona, which is always included in full (with the
+current date and time when the builder has a clock). Each other section gets a
+fixed fraction of the usable window (`ContextBudgets`). The default fractions
+leave some slack for tool schemas and per-message overhead, which are not
+counted.
+
+Two layouts (`ContextLayout`) arrange the same sections:
+
+- `"system"`: one system message holding the persona, the date line, the
+  profile, the standing instructions and the retrieved memories, then the
+  history. The date (to the minute) and the memories change every turn, so
+  each turn's prompt differs from the previous one right after the persona and
+  the model server reprocesses the whole history.
+- `"stable_prefix"`: the system message holds only what rarely changes (the
+  persona, then the standing instructions, then the profile), followed by the
+  history; what changes every turn (the date line and the memories) comes last,
+  in a block attached to the latest user message. Each turn's prompt then
+  extends the previous one up to that user message, so the server can reuse
+  its cached prefix. The block exists only in the prompt: the stored
+  conversation is unchanged, and later turns do not replay it.
 """
 
 from __future__ import annotations
@@ -12,6 +28,7 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Callable, Sequence
+from datetime import datetime
 from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -20,9 +37,42 @@ from lucy.core.types import MemoryContext, Message, Role
 
 SectionName = Literal["persona", "profile", "instructions", "memories", "history"]
 
+ContextLayout = Literal["system", "stable_prefix"]
+"""How the sections are arranged; see the module docstring."""
+
+TurnBlockPlacement = Literal["system", "user"]
+"""Where `"stable_prefix"` puts the per-turn block: as a system message right
+after the latest user message, or inside that user message, before its text."""
+
 PROFILE_LABEL = "## About the user"
 INSTRUCTIONS_LABEL = "## Standing instructions from the user"
 MEMORIES_LABEL = "## Things you remember that may be relevant"
+TURN_CONTEXT_LABEL = "[Context for this turn, not written by the user]"
+USER_MESSAGE_LABEL = "[The user's message]"
+
+
+def date_line(now: datetime) -> str:
+    """The line telling the model the current date and time, e.g.
+    "Today is Thursday, 12 November 2026, 11:42 IST (UTC+05:30).".
+
+    A timezone-aware `now` names its zone (when it has an alphabetic abbreviation)
+    and always its UTC offset, so the model can convert to other zones; a naive one
+    is labelled "(local time)"."""
+    return f"Today is {now:%A}, {now.day} {now:%B %Y, %H:%M} {_zone(now)}."
+
+
+def _zone(now: datetime) -> str:
+    offset = now.utcoffset()
+    if offset is None:
+        return "(local time)"
+    minutes = round(offset.total_seconds() / 60)
+    sign = "-" if minutes < 0 else "+"
+    hours, mins = divmod(abs(minutes), 60)
+    utc = f"(UTC{sign}{hours:02d}:{mins:02d})"
+    name = now.tzname() or ""
+    if name.isalpha() and name.upper() != "UTC":
+        return f"{name} {utc}"
+    return utc
 
 
 def estimate_tokens(text: str) -> int:
@@ -79,7 +129,7 @@ class BuiltContext(BaseModel):
 
 
 class ContextBuilder:
-    """Builds one system message plus a trimmed history from memory and the conversation."""
+    """Builds the messages for one LLM call from memory and the conversation."""
 
     def __init__(
         self,
@@ -87,14 +137,41 @@ class ContextBuilder:
         *,
         budgets: ContextBudgets | None = None,
         count_tokens: Callable[[str], int] = estimate_tokens,
+        clock: Callable[[], datetime] | None = None,
+        layout: ContextLayout = "system",
+        turn_block: TurnBlockPlacement = "system",
     ) -> None:
+        """`clock` returns the current local time (timezone-aware, so the line names
+        the zone); with it, every build adds `date_line` (counted with the persona):
+        after the persona in the `"system"` layout, in the per-turn block in the
+        `"stable_prefix"` layout. `turn_block` matters only for `"stable_prefix"`."""
         self._persona = persona.strip()
         self._budgets = budgets if budgets is not None else ContextBudgets()
         self._count = count_tokens
+        self._clock = clock
+        self._layout: ContextLayout = layout
+        self._turn_block: TurnBlockPlacement = turn_block
+
+    @property
+    def layout(self) -> ContextLayout:
+        return self._layout
+
+    def _date(self) -> str:
+        return "" if self._clock is None else date_line(self._clock())
+
+    def _persona_text(self) -> str:
+        """The persona plus the date line: what the persona section counts."""
+        date = self._date()
+        return f"{self._persona}\n\n{date}" if date else self._persona
 
     def token_budgets(self, context_window: int, reserve_output: int = 1024) -> dict[str, int]:
         """Token budget of each budgeted section for a model with `context_window` tokens."""
-        usable = max(0, context_window - reserve_output - self._count(self._persona))
+        return self._budgets_for(self._persona_text(), context_window, reserve_output)
+
+    def _budgets_for(
+        self, persona: str, context_window: int, reserve_output: int
+    ) -> dict[str, int]:
+        usable = max(0, context_window - reserve_output - self._count(persona))
         budgets = self._budgets
         return {
             "profile": int(usable * budgets.profile),
@@ -116,9 +193,11 @@ class ContextBuilder:
         `history` must already end with the current user message, which is always
         kept even if it alone exceeds the history budget.
         """
-        budgets = self.token_budgets(context_window, reserve_output)
+        date = self._date()
+        persona = f"{self._persona}\n\n{date}" if date else self._persona
+        budgets = self._budgets_for(persona, context_window, reserve_output)
         persona_report = SectionReport(
-            name="persona", tokens=self._count(self._persona), included=1, dropped=0
+            name="persona", tokens=self._count(persona), included=1, dropped=0
         )
         profile_text, profile_report = self._profile(memory.profile, budgets["profile"])
         instructions_text, instructions_report = self._lines(
@@ -129,10 +208,14 @@ class ContextBuilder:
         )
         kept_history, history_report = self._history(history, budgets["history"])
 
-        parts = [self._persona, profile_text, instructions_text, memories_text]
-        system = Message(role=Role.SYSTEM, content="\n\n".join(p for p in parts if p))
+        if self._layout == "system":
+            parts = [persona, profile_text, instructions_text, memories_text]
+            messages = [_system(parts), *kept_history]
+        else:
+            stable = _system([self._persona, instructions_text, profile_text])
+            messages = [stable, *self._with_turn_block(kept_history, [date, memories_text])]
         return BuiltContext(
-            messages=[system, *kept_history],
+            messages=messages,
             report=[
                 persona_report,
                 profile_report,
@@ -141,6 +224,26 @@ class ContextBuilder:
                 history_report,
             ],
         )
+
+    def _with_turn_block(self, history: list[Message], parts: Sequence[str]) -> list[Message]:
+        """`history` with the per-turn block attached to its latest user message.
+
+        The block is placed as `turn_block` says; with nothing to say, or no user
+        message, `history` is returned as it is."""
+        block = "\n\n".join(p for p in parts if p)
+        latest = max((i for i, m in enumerate(history) if m.role is Role.USER), default=None)
+        if not block or latest is None:
+            return list(history)
+        if self._turn_block == "system":
+            note = Message(role=Role.SYSTEM, content=block)
+            return [*history[: latest + 1], note, *history[latest + 1 :]]
+        message = history[latest]
+        content = f"{TURN_CONTEXT_LABEL}\n{block}\n\n{USER_MESSAGE_LABEL}\n{message.content}"
+        return [
+            *history[:latest],
+            message.model_copy(update={"content": content}),
+            *history[latest + 1 :],
+        ]
 
     # --- Sections -------------------------------------------------------------
 
@@ -227,6 +330,10 @@ class ContextBuilder:
         for call in message.tool_calls or ():
             tokens += self._count(call.name) + self._count(json.dumps(call.arguments))
         return tokens
+
+
+def _system(parts: Sequence[str]) -> Message:
+    return Message(role=Role.SYSTEM, content="\n\n".join(p for p in parts if p))
 
 
 def _group(history: Sequence[Message]) -> list[list[Message]]:

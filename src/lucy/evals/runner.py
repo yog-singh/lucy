@@ -17,7 +17,7 @@ from typing import Any, Final
 
 from lucy.app import LucyApp
 from lucy.clients import memory_cli
-from lucy.core.config import AdapterConfig, Settings
+from lucy.core.config import AdapterConfig, Settings, ToolsSettings
 from lucy.core.events import TextDelta, TurnEnded, UserMessage
 from lucy.core.jobs import JobStatus
 from lucy.core.registry import Registry
@@ -105,9 +105,10 @@ class ScenarioResult:
 
 
 def settings_for(settings: Settings, db: Path) -> Settings:
-    """`settings` with the memory store on `db` (the configured store is never touched)."""
+    """`settings` with the memory store on `db` (the configured store is never touched)
+    and every tool off, so scenarios measure memory without network lookups."""
     memory = AdapterConfig(adapter="sqlite", options={"path": str(db)})
-    return settings.model_copy(update={"memory": memory})
+    return settings.model_copy(update={"memory": memory, "tools": ToolsSettings()})
 
 
 def describe_statement(statement: Statement, now: datetime) -> str:

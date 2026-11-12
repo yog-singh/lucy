@@ -11,6 +11,7 @@ from lucy.core.events import (
     AssistantMessage,
     Event,
     Interrupt,
+    PlaybackInterrupted,
     SentenceReady,
     TextDelta,
     ToolFinished,
@@ -462,3 +463,55 @@ async def test_event_published_right_after_start_is_not_lost() -> None:
     async with h:
         events = await h.until_turns_end()
     assert summary(events[-1]) == ("turn_ended", "completed", "")
+
+
+# --- Playback interruptions (ADR 0016) ------------------------------------------------
+
+
+async def test_playback_interrupted_is_persisted_once_and_changes_nothing_else() -> None:
+    async with Harness([text("One. Two."), text("Fine.")]) as h:
+        await h.say("count")
+        (ended,) = [e for e in await h.until_turns_end() if isinstance(e, TurnEnded)]
+        record = PlaybackInterrupted(session_id="s", turn_id=ended.turn_id, spoken_text="One.")
+        await h.bus.publish(record)
+        await h.say("again")
+        events = await h.until_turns_end()
+    assert [e for e in h.memory.episodes if isinstance(e, PlaybackInterrupted)] == [record]
+    assert ("playback_interrupted",) not in [summary(e)[:1] for e in events]
+    assert summary(events[-1]) == ("turn_ended", "completed", "")
+    # The next turn's history holds what was spoken.
+    assert h.llm.calls[1][1:] == [
+        Message(role=Role.USER, content="count"),
+        Message(role=Role.ASSISTANT, content="One."),
+        Message(role=Role.USER, content="again"),
+    ]
+
+
+async def test_playback_interrupted_does_not_disturb_a_running_turn() -> None:
+    pause = Pause()
+    async with Harness([[LLMChunk(text="Still "), pause, LLMChunk(text="going.")]]) as h:
+        await h.say("hi")
+        async with asyncio.timeout(1):
+            await pause.reached.wait()
+        await h.bus.publish(PlaybackInterrupted(session_id="s", turn_id="old", spoken_text="x"))
+        await asyncio.sleep(0.01)
+        pause.release.set()
+        events = await h.until_turns_end()
+    assert summary(events[-1]) == ("turn_ended", "completed", "")
+    replies = [e for e in h.memory.episodes if isinstance(e, AssistantMessage)]
+    assert [(r.text, r.interrupted) for r in replies] == [("Still going.", False)]
+
+
+async def test_a_failing_store_for_playback_interrupted_is_logged(caplog) -> None:
+    class Failing(InMemoryMemoryStore):
+        async def append_episode(self, event):  # type: ignore[no-untyped-def]
+            if isinstance(event, PlaybackInterrupted):
+                raise RuntimeError("disk full")
+            await super().append_episode(event)
+
+    async with Harness([text("Hi.")], memory=Failing()) as h:
+        await h.bus.publish(PlaybackInterrupted(session_id="s", turn_id="t", spoken_text=""))
+        await h.say("hello")
+        events = await h.until_turns_end()
+    assert summary(events[-1]) == ("turn_ended", "completed", "")
+    assert "could not record playback interruption" in caplog.text

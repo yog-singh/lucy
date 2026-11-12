@@ -16,11 +16,11 @@ from lucy.core.types import LLMChunk
 from lucy.memory.graph_store import GraphNotFoundError, GraphStoreError, SQLiteGraphStore
 from lucy.memory.models import NewStatement, Origin, ScoredStatement, Statement, StatementKind
 from lucy.memory.policy import MemoryPolicy
-from lucy.memory.reconcile import Outcome, Reconciler
+from lucy.memory.reconcile import SHOWN_MAX, Outcome, Reconciler
 from lucy.memory.sqlite_store import SQLiteMemoryStore
 from tests.fakes import FakeLLM
 from tests.graph_support import T0, Clock, HashingEmbedder, log, new
-from tests.memory_extraction_support import TEST_POLICY_VALUES, decision
+from tests.memory_extraction_support import TEST_POLICY_VALUES, decision, reply
 
 POLICY = MemoryPolicy(**TEST_POLICY_VALUES)
 
@@ -726,3 +726,257 @@ async def test_no_second_hop_when_a_habit_replaces_a_habit(h: Harness) -> None:
     )
     assert result.outcome is Outcome.SUPERSEDE and result.target_id == old.id
     assert len(h.llm.calls) == 1
+
+
+# --- Change events ------------------------------------------------------------------
+
+#: The real gap with a change event: under the usual floor, above the change floor.
+WIDE = MemoryPolicy(
+    **TEST_POLICY_VALUES | {"statement_similarity_floor": 0.95, "change_similarity_floor": 0.0}
+)
+
+
+def change_reply(
+    new_text: str | None,
+    action: str,
+    target: int | None = None,
+    *,
+    predicate: str | None = None,
+) -> list[LLMChunk]:
+    """A scripted reply to a change event's call (`target` is a shown number)."""
+    return reply(
+        {"new_text": new_text, "new_predicate": predicate, "action": action, "target": target}
+    )
+
+
+async def test_a_change_event_supersedes_the_old_state_with_the_new_state(h: Harness) -> None:
+    """ "switched to decaf" shares no words with "drinks dark roast": it is shown anyway, and
+    the new state, in the old statement's form and kind, replaces it from the message date."""
+    h.reconciler.policy = WIDE
+    old = await h.existing(
+        "Arjun drinks dark roast coffee every morning",
+        kind=StatementKind.PREFERENCE,
+        predicate="drinks",
+    )
+    said = T0 + timedelta(days=21)
+    h.script(change_reply("Arjun drinks decaf coffee.", "supersede", 1, predicate="drinks"))
+    result = await h.reconciler.reconcile(
+        cand("Arjun switched to decaf for good", predicate="switched to", observed_at=said),
+        [await h.episode()],
+        change=True,
+    )
+    assert result.outcome is Outcome.SUPERSEDE and result.target_id == old.id
+    assert len(h.llm.calls) == 1
+    prompt = h.prompt()
+    assert "[1] Arjun drinks dark roast coffee every morning (preference" in prompt
+    assert "New statement (a change): Arjun switched to decaf for good (fact, stated)" in prompt
+    stored = result.statement
+    assert stored is not None
+    assert (stored.text, stored.predicate) == ("Arjun drinks decaf coffee.", "drinks")
+    assert stored.kind is StatementKind.PREFERENCE and stored.valid_from == said
+    closed = await h.graph.get_statement(old.id)
+    assert closed is not None
+    assert closed.superseded_by == stored.id and closed.invalid_at == said
+    assert [s.text for s in await h.graph.list_statements(current_only=False)] == [
+        "Arjun drinks dark roast coffee every morning",
+        "Arjun drinks decaf coffee.",
+    ]
+
+
+async def test_a_change_event_ends_the_old_state_on_the_date_the_user_gave(h: Harness) -> None:
+    h.reconciler.policy = WIDE
+    old = await h.existing("Arjun drives to work", kind=StatementKind.HABIT, valid_from=T0)
+    since = T0 + timedelta(days=10)
+    h.script(change_reply("Arjun cycles to work.", "supersede", 1, predicate="cycles"))
+    result = await h.reconciler.reconcile(
+        cand(
+            "Arjun started cycling to work",
+            predicate="started",
+            valid_from=since,
+            observed_at=since + timedelta(days=4),
+        ),
+        [await h.episode()],
+        change=True,
+    )
+    assert result.statement is not None and result.statement.kind is StatementKind.HABIT
+    closed = await h.graph.get_statement(old.id)
+    assert closed is not None and closed.invalid_at == result.statement.valid_from == since
+
+
+async def test_a_change_event_with_nothing_known_is_stored_as_the_new_state(h: Harness) -> None:
+    h.script(change_reply("Arjun takes notes in Obsidian.", "add", predicate="takes notes in"))
+    result = await h.reconciler.reconcile(
+        cand("Arjun switched to Obsidian for notes", predicate="switched to"),
+        [await h.episode()],
+        change=True,
+    )
+    assert result.outcome is Outcome.ADD and result.asked_model
+    assert len(h.llm.calls) == 1  # one call, even with nothing to show
+    assert "Known statements: none" in h.prompt()
+    assert [s.text for s in await h.graph.list_statements()] == ["Arjun takes notes in Obsidian."]
+
+
+async def test_each_change_event_costs_exactly_one_call(h: Harness) -> None:
+    h.reconciler.policy = WIDE
+    for i in range(8):
+        await h.existing(f"Arjun fact number {i} about things")
+    h.script(change_reply("Arjun lives in Porto city.", "add"))
+    await h.reconciler.reconcile(
+        cand("Arjun moved to Porto city", predicate="moved to"), [await h.episode()], change=True
+    )
+    assert len(h.llm.calls) == 1
+    shown = [line for line in h.prompt().splitlines() if line.startswith("[")]
+    assert len(shown) == SHOWN_MAX
+
+
+@pytest.mark.parametrize(
+    ("new_text", "why"),
+    [
+        (None, "nothing given"),
+        ("Arjun has switched to decaf coffee.", "still a change"),
+        ("Sam drinks decaf coffee.", "a name from nowhere (the prompt's example)"),
+        ("x" * 301, "too long"),
+    ],
+)
+async def test_an_unusable_new_state_keeps_the_change_event(
+    h: Harness, new_text: str | None, why: str
+) -> None:
+    h.reconciler.policy = WIDE
+    old = await h.existing("Arjun drinks dark roast coffee", kind=StatementKind.PREFERENCE)
+    h.script(change_reply(new_text, "supersede", 1, predicate="drinks"))
+    result = await h.reconciler.reconcile(
+        cand("Arjun switched to decaf", predicate="switched to"),
+        [await h.episode()],
+        change=True,
+    )
+    assert result.outcome is Outcome.SUPERSEDE and result.target_id == old.id, why
+    assert result.statement is not None
+    assert (result.statement.text, result.statement.predicate) == (
+        "Arjun switched to decaf",
+        "switched to",
+    )
+    assert result.statement.kind is StatementKind.FACT  # not reworded: its own kind
+
+
+async def test_a_change_that_only_says_what_ended_is_not_reworded_as_a_negation(
+    h: Harness,
+) -> None:
+    h.reconciler.policy = WIDE
+    old = await h.existing("Arjun works at Brightline studio", predicate="works at")
+    h.script(change_reply("Arjun does not work at Brightline.", "supersede", 1))
+    result = await h.reconciler.reconcile(
+        cand("Arjun left Brightline studio", predicate="left"), [await h.episode()], change=True
+    )
+    assert result.outcome is Outcome.SUPERSEDE and result.target_id == old.id
+    assert result.statement is not None and result.statement.text == "Arjun left Brightline studio"
+
+
+async def test_a_change_event_never_touches_another_subjects_statements(h: Harness) -> None:
+    h.reconciler.policy = WIDE
+    tobias = await h.graph.create_entity("person", "Tobias")
+    theirs = await h.graph.add_statement(
+        new("Tobias drinks dark roast coffee", subject_id=tobias.id), [await h.episode()]
+    )
+    h.script(change_reply("Arjun drinks decaf coffee.", "add"))
+    await h.reconciler.reconcile(
+        cand("Arjun switched to decaf coffee", predicate="switched to"),
+        [await h.episode()],
+        change=True,
+    )
+    assert "Tobias" not in h.prompt()  # only the subject's own statements are shown
+    # Even if the store returned it and the model named it, it is not superseded.
+    original = h.graph.similar_statements
+
+    async def leaky(*args: object, **kwargs: object) -> list[ScoredStatement]:
+        hits = await original(*args, **kwargs)  # type: ignore[arg-type]
+        return [ScoredStatement(statement=theirs, score=0.99), *hits]
+
+    h.graph.similar_statements = leaky  # type: ignore[method-assign]
+    h.script(change_reply("Arjun drinks oat milk lattes.", "supersede", 1))
+    result = await h.reconciler.reconcile(
+        cand("Arjun switched to oat milk lattes", predicate="switched to"),
+        [await h.episode()],
+        change=True,
+    )
+    assert result.outcome is Outcome.ADD and "another subject" in result.reason
+    kept = await h.graph.get_statement(theirs.id)
+    assert kept is not None and kept.invalid_at is None
+
+
+async def test_an_inferred_change_never_supersedes_a_stated_statement(h: Harness) -> None:
+    h.reconciler.policy = WIDE
+    old = await h.existing("Arjun drinks dark roast coffee")
+    h.script(change_reply("Arjun drinks decaf coffee.", "supersede", 1))
+    result = await h.reconciler.reconcile(
+        cand("Arjun switched to decaf", predicate="switched to", origin=Origin.INFERRED),
+        [await h.episode()],
+        change=True,
+    )
+    assert result.outcome is Outcome.IGNORE
+    kept = await h.graph.get_statement(old.id)
+    assert kept is not None and kept.invalid_at is None
+
+
+async def test_a_change_whose_target_this_turn_already_replaced_is_ignored(h: Harness) -> None:
+    """ "Tobias moved from Lisbon": the turn's "lives in Porto" already replaced Lisbon."""
+    old = await h.existing("Arjun lives in Lisbon city", predicate="lives in")
+    ep = await h.episode()
+    h.script(decision("supersede", 1))
+    first = await h.reconciler.reconcile(
+        cand("Arjun lives in Porto city", predicate="lives in"), [ep], pass_episodes=[ep]
+    )
+    assert first.outcome is Outcome.SUPERSEDE
+    h.script(change_reply(None, "supersede", 1))
+    second = await h.reconciler.reconcile(
+        cand("Arjun moved from Lisbon city", predicate="moved from"),
+        [ep],
+        pass_episodes=[ep],
+        change=True,
+    )
+    assert second.outcome is Outcome.IGNORE and "already replaced" in second.reason
+    assert [s.text for s in await h.graph.list_statements()] == ["Arjun lives in Porto city"]
+    closed = await h.graph.get_statement(old.id)
+    assert closed is not None and closed.superseded_by == first.statement.id  # type: ignore[union-attr]
+
+
+async def test_a_reworded_change_beside_an_ending_from_this_turn_is_added(h: Harness) -> None:
+    """ "I moved my notes over to Obsidian": the turn's "gave up Evernote" already ended the
+    old habit; the new state is still worth keeping."""
+    old = await h.existing("Arjun keeps notes in Evernote", kind=StatementKind.HABIT)
+    ep = await h.episode()
+    await h.graph.supersede(old.id, cand("Arjun gave up using Evernote"), [ep])
+    h.script(change_reply("Arjun keeps notes in Obsidian.", "supersede", 1, predicate="keeps"))
+    result = await h.reconciler.reconcile(
+        cand("Arjun moved his notes to Obsidian", predicate="moved"),
+        [ep],
+        pass_episodes=[ep],
+        change=True,
+    )
+    assert result.outcome is Outcome.ADD and "already replaced" in result.reason
+    assert {s.text for s in await h.graph.list_statements()} == {
+        "Arjun gave up using Evernote",
+        "Arjun keeps notes in Obsidian.",
+    }
+    closed = await h.graph.get_statement(old.id)
+    assert closed is not None and closed.invalid_at is not None
+
+
+async def test_a_reworded_change_that_repeats_a_sibling_is_a_duplicate(h: Harness) -> None:
+    ep = await h.episode()
+    sibling = await h.reconciler.reconcile(
+        cand("Arjun works at Kestrel Studio", predicate="works at"), [ep], pass_episodes=[ep]
+    )
+    h.script(change_reply("Arjun works at Kestrel Studio.", "add", predicate="works at"))
+    result = await h.reconciler.reconcile(
+        cand("Arjun joined Kestrel Studio as a designer", predicate="joined"),
+        [ep],
+        pass_episodes=[ep],
+        change=True,
+    )
+    assert result.outcome is Outcome.DUPLICATE and result.target_id == sibling.statement.id  # type: ignore[union-attr]
+    assert len(await h.graph.list_statements()) == 1
+
+
+def test_the_change_floor_may_not_exceed_the_statement_floor() -> None:
+    with pytest.raises(ValidationError):
+        MemoryPolicy(change_similarity_floor=0.9, statement_similarity_floor=0.84)

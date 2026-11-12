@@ -575,6 +575,63 @@ async def test_long_whitespace_is_kept_without_schema_and_in_short_runs() -> Non
     assert len(texts(await collect(llm))) == 1000
 
 
+# --- Hidden loop (repeated empty thought blocks) ----------------------------------
+
+EMPTY_THOUGHT = ["<|channel>", "thought", "\n", "<channel|>"]
+"""The empty thought block gemma4:12b-mlx repeats (captured with logprobs on Ollama 0.40.16)."""
+
+
+def hidden(token: str) -> dict[str, Any]:
+    """A chunk Ollama sends for a stripped token when logprobs are on."""
+    event = text("")
+    event["choices"][0]["logprobs"] = {"content": [{"token": token, "logprob": -0.1}]}
+    return event
+
+
+def visible(content: str) -> dict[str, Any]:
+    event = text(content)
+    event["choices"][0]["logprobs"] = {"content": [{"token": content, "logprob": -0.1}]}
+    return event
+
+
+async def test_hidden_loop_ends_the_response_without_output() -> None:
+    loop = [hidden(token) for token in EMPTY_THOUGHT * 4]
+    body = Body([sse(*loop, done=False)], hang=True)
+    llm, requests = make_llm(lambda r: httpx.Response(200, stream=body), hidden_loop_repeats=4)
+    async with asyncio.timeout(1):
+        chunks = await collect(llm)
+    assert chunks == [LLMChunk(finish_reason=FinishReason.LENGTH)]
+    assert body.closed
+    assert json.loads(requests[0].content)["logprobs"] is True
+
+
+async def test_hidden_loop_needs_the_full_count_of_repeats() -> None:
+    # Normal replies start with up to two empty blocks, then text or a tool call.
+    blocks = [hidden(token) for token in EMPTY_THOUGHT * 3]
+    llm, _ = make_llm(sse(*blocks, visible("Hi"), finish()), hidden_loop_repeats=4)
+    assert texts(await collect(llm)) == "Hi"
+    call = [hidden("<|tool_call>"), hidden("call:"), *[hidden("x")] * 20]
+    tool = call_delta(0, id="c1", name="get_weather", args="{}")
+    llm, _ = make_llm(sse(*blocks[:8], *call, tool, finish()), hidden_loop_repeats=4)
+    chunks = await collect(llm)
+    assert [c.tool_call.name for c in chunks if c.tool_call] == ["get_weather"]
+
+
+async def test_hidden_tokens_after_visible_output_are_not_checked() -> None:
+    after = [hidden(token) for token in EMPTY_THOUGHT * 5]
+    llm, _ = make_llm(sse(visible("Hi"), *after, visible("!"), finish()), hidden_loop_repeats=2)
+    assert texts(await collect(llm)) == "Hi!"
+
+
+async def test_hidden_loop_check_is_off_by_default() -> None:
+    loop = [hidden(token) for token in EMPTY_THOUGHT * 10]
+    llm, requests = make_llm(sse(*loop, visible("late"), finish()))
+    assert texts(await collect(llm)) == "late"
+    assert "logprobs" not in json.loads(requests[0].content)
+    with pytest.raises(ValueError, match="at least 2"):
+        make_llm(sse(finish()), hidden_loop_repeats=1)
+
+
 # --- Early exit ---------------------------------------------------------------
 
 

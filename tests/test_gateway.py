@@ -2,20 +2,26 @@ import asyncio
 import json
 from collections.abc import AsyncIterator, Sequence
 from contextlib import aclosing
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from pydantic import BaseModel
 
+from lucy.core import gateway as gateway_module
 from lucy.core.config import LLMSettings
 from lucy.core.gateway import (
     GatewayError,
     LLMGateway,
     Preempted,
     Priority,
+    SilentStreamError,
     StructuredOutputError,
+    add_fallbacks,
+    fallbacks_in_context,
 )
 from lucy.core.registry import Registry
-from lucy.core.types import FinishReason, LLMCaps, LLMChunk, Message, Role, ToolSpec
+from lucy.core.trace import StepFallback, StepTrace, TurnTrace
+from lucy.core.types import FinishReason, LLMCaps, LLMChunk, Message, Role, ToolCall, ToolSpec
 from tests.fakes import FakeLLM, Pause, Raise
 
 HELLO = [Message(role=Role.USER, content="hi")]
@@ -510,3 +516,274 @@ async def test_waiting_background_is_not_preempted() -> None:
         second_pause.release.set()
         assert await fg == ["a"] and await second == ["b"]
         assert await bg == ["x"]
+
+
+# --- Silent streams and fallback ------------------------------------------------
+
+SILENT = [LLMChunk(finish_reason=FinishReason.LENGTH)]
+"""What the adapter sends when it detects a hidden loop: a finish reason and no output."""
+
+
+def fallback_gateway(
+    chat: FakeLLM, deep: FakeLLM, *, timeout: float | None = None, **extra: FakeLLM
+) -> LLMGateway:
+    return LLMGateway(
+        {"chat": chat, "chat_deep": deep, **extra},
+        fallbacks={"chat": "chat_deep"},
+        first_output_timeouts={"chat": timeout} if timeout is not None else None,
+    )
+
+
+async def chunks_of(gateway: LLMGateway, role: str = "chat") -> list[LLMChunk]:
+    return [c async for c in gateway.stream(role, HELLO, priority=Priority.FOREGROUND)]
+
+
+async def test_silent_primary_is_served_by_the_fallback_role(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    chat = FakeLLM([SILENT])
+    deep = FakeLLM([[LLMChunk(text="Deep."), LLMChunk(finish_reason=FinishReason.STOP)]])
+    gateway = fallback_gateway(chat, deep)
+    assert await chunks_of(gateway) == [
+        LLMChunk(text="Deep."),
+        LLMChunk(finish_reason=FinishReason.STOP),
+    ]
+    assert deep.calls == chat.calls == [HELLO]
+    assert chat.exits == deep.exits == ["done"]
+    assert gateway.foreground_active == 0
+    [record] = fallbacks_in_context()
+    assert (record.role, record.served_by) == ("chat", "chat_deep")
+    assert record.reason.startswith("ended without output") and record.lost_seconds >= 0
+    assert "asking role 'chat_deep' instead" in caplog.text
+
+
+async def test_stalled_primary_times_out_into_the_fallback() -> None:
+    stall = Pause()
+    chat = FakeLLM([[stall]])
+    deep = FakeLLM([[LLMChunk(tool_call=ToolCall(id="c1", name="wikipedia"))]])
+    gateway = fallback_gateway(chat, deep, timeout=0.05)
+    async with asyncio.timeout(1):
+        chunks = await chunks_of(gateway)
+    assert [c.tool_call.name for c in chunks if c.tool_call] == ["wikipedia"]
+    assert chat.exits == ["cancelled"] and chat.open_streams == 0
+    assert fallbacks_in_context()[0].reason == "no output within 0.05s"
+
+
+async def test_no_retry_once_text_was_yielded() -> None:
+    stall = Pause()
+    chat = FakeLLM([[LLMChunk(text="Partly"), stall, LLMChunk(text=" done.")]])
+    deep = FakeLLM([])
+    gateway = fallback_gateway(chat, deep, timeout=0.01)
+    stream = gateway.stream("chat", HELLO)
+    async with aclosing(stream):
+        assert await anext(stream) == LLMChunk(text="Partly")
+        read = asyncio.create_task(anext(stream))
+        await asyncio.sleep(0.05)  # well past the first-output timeout
+        assert not read.done()
+        stall.release.set()
+        assert await read == LLMChunk(text=" done.")
+    assert deep.calls == [] and fallbacks_in_context() == ()
+
+
+async def test_held_finish_reason_is_dropped_on_fallback_and_kept_otherwise() -> None:
+    # A bare finish chunk before any output is passed on once output follows.
+    chat = FakeLLM([[LLMChunk(finish_reason=FinishReason.STOP), LLMChunk(text="Late.")]])
+    gateway = fallback_gateway(chat, FakeLLM([]))
+    assert await chunks_of(gateway) == [
+        LLMChunk(finish_reason=FinishReason.STOP),
+        LLMChunk(text="Late."),
+    ]
+
+
+async def test_both_silent_raises_a_readable_error() -> None:
+    chat, deep = FakeLLM([SILENT]), FakeLLM([[Pause()]])
+    gateway = LLMGateway(
+        {"chat": chat, "chat_deep": deep},
+        fallbacks={"chat": "chat_deep"},
+        first_output_timeouts={"chat_deep": 0.05},
+    )
+    with pytest.raises(SilentStreamError, match="neither did its fallback role 'chat_deep'"):
+        async with asyncio.timeout(1):
+            await chunks_of(gateway)
+    assert isinstance(SilentStreamError("x"), GatewayError)
+    assert chat.open_streams == deep.open_streams == gateway.foreground_active == 0
+    assert len(deep.calls) == 1  # the fallback is not retried
+
+
+async def test_role_without_fallback_is_unchanged() -> None:
+    chat = FakeLLM([SILENT, [LLMChunk(text="x")]])
+    gateway = LLMGateway({"chat": chat})
+    assert await chunks_of(gateway) == SILENT  # an empty reply, as before
+    assert await chunks_of(gateway) == [LLMChunk(text="x")]
+    assert fallbacks_in_context() == ()
+
+
+async def test_timeout_without_fallback_raises() -> None:
+    chat = FakeLLM([[Pause()]])
+    gateway = LLMGateway({"chat": chat}, first_output_timeouts={"chat": 0.05})
+    with pytest.raises(SilentStreamError, match="no output within 0.05s"):
+        async with asyncio.timeout(1):
+            await chunks_of(gateway)
+    assert chat.exits == ["cancelled"]
+
+
+async def test_background_lane_ignores_fallbacks() -> None:
+    chat = FakeLLM([SILENT])
+    gateway = fallback_gateway(chat, FakeLLM([]), timeout=0.01)
+    assert await consume(gateway, "chat", Priority.BACKGROUND) == [""]
+
+
+async def test_preemption_and_lanes_during_a_fallback() -> None:
+    running = Pause()
+    worker = FakeLLM(
+        [[LLMChunk(text="bg"), running, LLMChunk(text="never")], [LLMChunk(text="ok")]]
+    )
+    deep_pause = Pause()
+    chat = FakeLLM([SILENT])
+    deep = FakeLLM([[deep_pause, LLMChunk(text="Deep.")]])
+    gateway = fallback_gateway(chat, deep, worker=worker)
+    received: list[str] = []
+    async with asyncio.timeout(1):
+        background = await start_background(gateway, "worker", received)
+        await running.reached.wait()
+
+        foreground = asyncio.create_task(chunks_of(gateway))
+        with pytest.raises(Preempted):
+            await background
+        assert received == ["bg"]
+        await deep_pause.reached.wait()  # the fallback attempt is running
+        assert gateway.foreground_active == 1 and gateway.background_running == 0
+        waiting = asyncio.create_task(consume(gateway, "worker", Priority.BACKGROUND))
+        await wait_until(lambda: gateway.background_waiting == 1)
+        assert len(worker.calls) == 1  # still waiting for the foreground lane
+        deep_pause.release.set()
+        assert [c.text for c in await foreground] == ["Deep."]
+        assert await waiting == ["ok"]
+
+
+async def test_closing_early_during_either_attempt_releases_everything() -> None:
+    # During the first attempt (the consumer is cancelled while it stalls).
+    chat, deep = FakeLLM([[Pause()]]), FakeLLM([])
+    gateway = fallback_gateway(chat, deep, timeout=10)
+    task = asyncio.create_task(chunks_of(gateway))
+    await wait_until(lambda: chat.open_streams == 1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert chat.exits == ["cancelled"] and gateway.foreground_active == 0 and deep.calls == []
+
+    # During the fallback attempt (the consumer closes the stream after a chunk).
+    chat = FakeLLM([SILENT])
+    deep = FakeLLM([[LLMChunk(text="first"), Pause(), LLMChunk(text="second")]])
+    gateway = fallback_gateway(chat, deep)
+    stream = gateway.stream("chat", HELLO)
+    assert await anext(stream) == LLMChunk(text="first")
+    await stream.aclose()
+    assert deep.exits == ["closed"] and deep.open_streams == chat.open_streams == 0
+    assert gateway.foreground_active == 0
+
+
+def test_invalid_fallback_role_is_rejected() -> None:
+    with pytest.raises(GatewayError, match="invalid fallback"):
+        LLMGateway({"chat": FakeLLM([])}, fallbacks={"chat": "chat_deep"})
+
+
+async def test_from_settings_takes_fallbacks_and_shares_adapters() -> None:
+    registry = Registry()
+    registry.register("llm", "fake")(RegisteredLLM)
+    settings = LLMSettings.model_validate(
+        {
+            "roles": {
+                "chat": {
+                    "adapter": "fake",
+                    "model": "m",
+                    "fallback": "chat_deep",
+                    "first_output_timeout": 20,
+                },
+                "summary": {"adapter": "fake", "model": "m", "after_tool": "chat_deep"},
+                "chat_deep": {"adapter": "fake", "model": "deep"},
+            }
+        }
+    )
+    assert settings.roles["chat"].options == {"model": "m"}
+    gateway = LLMGateway.from_settings(settings, registry=registry)
+    # Same adapter and options: one instance, whatever the fallback settings.
+    assert gateway.for_role("chat") is gateway.for_role("summary")
+    assert gateway._fallbacks == {"chat": "chat_deep"}
+    assert gateway._first_output_timeouts == {"chat": 20}
+    assert gateway._after_tool == {"summary": "chat_deep"}
+
+
+def test_add_fallbacks_annotates_the_step_it_happened_in() -> None:
+    t0 = datetime(2026, 11, 12, 10, 0, tzinfo=UTC)
+    step = StepTrace(role="chat", messages=HELLO, started_at=t0, ended_at=t0 + timedelta(seconds=2))
+    later = step.model_copy(
+        update={"started_at": t0 + timedelta(seconds=3), "ended_at": t0 + timedelta(seconds=5)}
+    )
+    trace = TurnTrace(
+        turn_id="t",
+        session_id="s",
+        started_at=t0,
+        ended_at=t0 + timedelta(seconds=5),
+        steps=[step, later],
+        outcome="completed",
+    )
+    record = StepFallback(
+        role="chat",
+        served_by="chat_deep",
+        reason="r",
+        lost_seconds=0.5,
+        at=t0 + timedelta(seconds=3.5),
+    )
+    assert add_fallbacks(trace) is trace  # nothing recorded in this context
+    token = gateway_module._fallbacks.set((record,))
+    try:
+        annotated = add_fallbacks(trace)
+    finally:
+        gateway_module._fallbacks.reset(token)
+    assert [s.fallback for s in annotated.steps] == [None, record]
+
+
+# --- Answer steps after a tool result ----------------------------------------------
+
+TOOL_RESULT = [
+    *HELLO,
+    Message(role=Role.ASSISTANT, tool_calls=[ToolCall(id="c1", name="wikipedia")]),
+    Message(role=Role.TOOL, content="Article: ...", tool_call_id="c1"),
+]
+
+
+async def test_after_tool_role_serves_the_answer_step() -> None:
+    chat = FakeLLM([[LLMChunk(text="fast")]])
+    deep = FakeLLM([[LLMChunk(text="careful")]])
+    gateway = LLMGateway({"chat": chat, "chat_deep": deep}, after_tool={"chat": "chat_deep"})
+    answer = [c.text async for c in gateway.stream("chat", TOOL_RESULT)]
+    plain = [c.text async for c in gateway.stream("chat", HELLO)]
+    assert (answer, plain) == (["careful"], ["fast"])
+    assert deep.calls == [TOOL_RESULT] and chat.calls == [HELLO]
+    # Background streams are not rerouted.
+    chat_bg = FakeLLM([[LLMChunk(text="bg")]])
+    gateway = LLMGateway({"chat": chat_bg, "chat_deep": deep}, after_tool={"chat": "chat_deep"})
+    assert await consume_messages(gateway, TOOL_RESULT, Priority.BACKGROUND) == ["bg"]
+
+
+async def test_after_tool_role_uses_its_own_fallback_settings() -> None:
+    chat, deep, spare = FakeLLM([]), FakeLLM([SILENT]), FakeLLM([[LLMChunk(text="spare")]])
+    gateway = LLMGateway(
+        {"chat": chat, "chat_deep": deep, "spare": spare},
+        after_tool={"chat": "chat_deep"},
+        fallbacks={"chat_deep": "spare"},
+    )
+    assert [c.text async for c in gateway.stream("chat", TOOL_RESULT)] == ["spare"]
+    assert fallbacks_in_context()[-1].role == "chat_deep"
+
+
+def test_invalid_after_tool_role_is_rejected() -> None:
+    with pytest.raises(GatewayError, match="invalid after_tool"):
+        LLMGateway({"chat": FakeLLM([])}, after_tool={"chat": "chat"})
+
+
+async def consume_messages(
+    gateway: LLMGateway, messages: list[Message], priority: Priority
+) -> list[str]:
+    return [c.text or "" async for c in gateway.stream("chat", messages, priority=priority)]

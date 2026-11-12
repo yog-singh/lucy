@@ -10,12 +10,22 @@ Use "target": null for add and ignore.
 
 also_ends: only when you supersede because the user stopped or gave up something, the numbers of the other current statements about the user doing it (a habit of practising it, a goal for it). Otherwise [].
 
+A new statement marked "(a change)" says that something changed ("switched to", "moved to", "started"). First write what is true now:
+- new_text: one sentence saying the situation now, in the same form and with the same name as the known statement it replaces ("Sam drinks decaf coffee." for "Sam drinks dark roast coffee."). Never "switched", "moved", "changed" or "started". If no listed statement is replaced, still write what is true now. If the change only says what ended, not what is true instead ("left Brightline", "stopped running"), new_text and new_predicate are null.
+- new_predicate: the short predicate of new_text ("drinks").
+Then choose the action for new_text as above. Supersede only a statement about the same thing as the change; everything else stays.
+
 Examples:
 
 Known statements:
 [1] Sam drinks dark roast coffee. (preference, stated; current)
-New statement: Sam has switched to decaf coffee. (preference, stated)
-{"action": "supersede", "target": 1, "also_ends": []}
+[2] Sam lives in Leeds. (fact, stated; current)
+New statement (a change): Sam has switched to decaf. (fact, stated)
+{"new_text": "Sam drinks decaf coffee.", "new_predicate": "drinks", "action": "supersede", "target": 1, "also_ends": []}
+
+Known statements: none
+New statement (a change): Sam started cycling to work. (fact, stated)
+{"new_text": "Sam cycles to work.", "new_predicate": "cycles", "action": "add", "target": null, "also_ends": []}
 
 Known statements:
 [1] Sam lives in Leeds. (fact, stated; current)
