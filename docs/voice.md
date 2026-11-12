@@ -117,6 +117,28 @@ The context length turned out not to be the cause. Loading the model at 32,768 t
 
 Options considered: a GGUF (llama.cpp) build of the chat model, whose runner honours the context length and has a prompt-cache limit; a shorter `keep_alive`, since unloading frees the cache and reloading takes about 1.5 s; or raising it with Ollama upstream.
 
+### Keeping the MLX build with bounded memory (implemented; ADR 0017)
+
+Built into Lucy on 2026-11-13 and on by default. Three ten-turn voice runs with the policy inside Lucy measured a 1.26 to 1.34 s median from end of speech to first audio (worst turn 1.8 s), with the model at 10.0 GB peak and 8.4 GB median, matching the scripted measurements below. A longer voice conversation with tools and 3,100 to 3,700-token prompts measured a 1.53 s median; its re-warms took 9 to 11 s and finished before every next utterance. The measurements that led to it follow.
+
+The MLX runner's cache limit is a compile-time constant in Ollama (8 GiB of cached state on top of the 7.2 GiB of weights), so no setting can change it. Each request, of any kind, adds about 0.7 to 1.0 GB until the ceiling is reached after 9 to 12 requests.
+
+Unloading the model (`keep_alive: 0`, honoured on the OpenAI-compatible endpoint too) frees it in 0.3 s; a reload takes about 1 s and comes back at 7.75 GB. The policy that works: when Lucy has been idle for about a second after background work, unload, reload at once, and pre-fill the next turn's prompt prefix with two one-token requests. It requires the `stable_prefix` prompt layout, because in the default layout the date and memories change the system message on every turn and nothing can be pre-filled.
+
+| Ten-turn voice run | End of speech to first audio (median) | STT median / max | Model memory, peak / median | Swap |
+|---|---|---|---|---|
+| No policy, default layout | 1.62 s | 0.09 / 0.48 s | 16.8 / 14.3 GB | 8.4 to 11.5 GB |
+| No policy, `stable_prefix` | 1.30 s | 0.10 / 0.44 s | 16.8 / 14.2 GB | 11.2 to 14.0 GB |
+| Unload and re-warm (4 runs) | 1.30 to 1.32 s | 0.09 to 0.10 / 0.15 to 0.26 s | 10.0 / 8.4 GB | falls or flat |
+| No policy, with 4 GB of extra memory load | 1.57 s | 0.22 / 0.74 s | 16.8 / 14.2 GB | 7.3 to 19.3 GB |
+| Unload and re-warm, same extra load | 1.30 s | 0.10 / 0.15 s | 10.0 / 8.4 GB | 9.4 to 10.0 GB |
+
+- The 7.35 s median of the stage 1 measurement did not reproduce: with no policy at all, voice measured 1.3 to 1.6 s. Ollama's log shows only 2 to 4 GiB free at the time of the stage 1 run, so other processes were using more memory then. Bounding the model is therefore insurance against memory pressure and a large reduction in swap, not a fix for a fault that is always present.
+- In voice the unload and re-warm happen while Lucy's reply is playing, so the next utterance found the model warm every time. Voice prompts in this test were short (300 to 780 tokens); a turn that arrives before a long prefix is re-warmed would cost about 4 s.
+- In text chat with about 20 s between messages: median first word 0.37 s against 0.66 s without the policy. With 8 s between messages the re-warm cannot finish in time and turns after an unload take 3.5 to 7 s, so for text the unload should wait for a longer quiet period or a size threshold.
+- Guard: Lucy counts as busy from the user message to the end of the turn, while speech is in progress, while any foreground or background stream runs or waits, and while a job is running or due. Checking only for an open stream would have unloaded in the gap between a tool call and the next step.
+- Setting a zero keep-alive on background roles only is unsafe: a chat turn that pre-empts a background call starts cold.
+
 ### GGUF build, measured 2026-11-12 (not adopted yet)
 
 `gemma4:12b-it-q4_K_M` (8.0 GB) was tested on a temporary second Ollama server with a 32,768 context and a bounded prompt cache.
