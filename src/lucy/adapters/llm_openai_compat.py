@@ -33,9 +33,11 @@ times in 15 s and never recovered.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
+import time
 import uuid
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
@@ -44,7 +46,16 @@ from typing import Any, Final
 import httpx
 
 from lucy.core import registry
-from lucy.core.types import FinishReason, LLMCaps, LLMChunk, Message, Role, ToolCall, ToolSpec
+from lucy.core.types import (
+    FinishReason,
+    LLMCaps,
+    LLMChunk,
+    Message,
+    Prefill,
+    Role,
+    ToolCall,
+    ToolSpec,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -529,12 +540,29 @@ class OpenAICompatLLM:
         yield LLMChunk(finish_reason=reason)
 
 
+UNLOAD_WAIT_SECONDS: Final = 5.0
+"""How long `OllamaLLM.unload` waits for the model to leave the server's memory."""
+
+
 @registry.register("llm", "ollama")
 class OllamaLLM(OpenAICompatLLM):
     """`OpenAICompatLLM` defaulting to a local Ollama server.
 
     `json_schema` defaults to on: Ollama 0.40.16 enforces `response_format`
     JSON schemas for the installed MLX models (see the module docstring).
+
+    It also manages the model's residency (`capabilities.residency`, the
+    `ResidentLLM` port), through Ollama's native API at `base_url` without its
+    trailing `/v1`. Measured on Ollama 0.40.16 with `gemma4:12b-mlx`:
+
+    - `unload`: `POST /api/generate` with `keep_alive: 0` and no prompt; the
+      request returns at once and the model leaves memory about 0.3 s later,
+      which `unload` waits for (up to `UNLOAD_WAIT_SECONDS`, polling `/api/ps`).
+    - `load`: `POST /api/generate` with no prompt loads the model without
+      generating (about 1 s for the 7.75 GB starting size).
+    - `loaded_size`: the model's `size` in `GET /api/ps` (None when absent).
+    - `prefill`: the chat request `stream` would send, unstreamed, with
+      `max_tokens: 1`, so the server caches the prompt.
     """
 
     server_name = "Ollama"
@@ -543,3 +571,77 @@ class OllamaLLM(OpenAICompatLLM):
         self, *, base_url: str = OLLAMA_BASE_URL, json_schema: bool = True, **options: Any
     ) -> None:
         super().__init__(base_url=base_url, json_schema=json_schema, **options)
+        self.capabilities = self.capabilities.model_copy(update={"residency": True})
+        self._native = self.base_url.removesuffix("/v1")
+
+    @property
+    def residency_key(self) -> str:
+        """The server's native address and the model name."""
+        return f"{self._native}|{self.model}"
+
+    async def _native_call(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        """`method` on `path` of the native API (or, for "/chat/completions", the
+        OpenAI-compatible one); LLMError unless it answers 200."""
+        if self._client.is_closed:
+            raise LLMError(f"the LLM adapter for {self.model!r} has been closed")
+        url = path if path == "/chat/completions" else f"{self._native}{path}"
+        try:
+            response = await self._client.request(method, url, **kwargs)
+        except httpx.HTTPError as exc:
+            raise LLMError(f"{method} {path} on {self._where()} failed: {exc!r}") from exc
+        if response.status_code != 200:
+            raise LLMError(
+                f"{self._where()} returned HTTP {response.status_code} for {method} {path} "
+                f"(model {self.model!r}): {_error_detail(response)}"
+            )
+        return response
+
+    async def unload(self) -> None:
+        """Unload the model and wait until the server no longer lists it."""
+        await self._native_call(
+            "POST", "/api/generate", json={"model": self.model, "keep_alive": 0}
+        )
+        deadline = time.monotonic() + UNLOAD_WAIT_SECONDS
+        while await self.loaded_size() is not None:
+            if time.monotonic() > deadline:
+                raise LLMError(
+                    f"{self._where()} still lists {self.model!r} {UNLOAD_WAIT_SECONDS:g}s "
+                    "after it was asked to unload it"
+                )
+            await asyncio.sleep(0.05)
+
+    async def load(self) -> None:
+        """Load the model without generating."""
+        await self._native_call("POST", "/api/generate", json={"model": self.model})
+
+    async def loaded_size(self) -> int | None:
+        """Bytes the model occupies on the server, or None when it is not loaded."""
+        response = await self._native_call("GET", "/api/ps")
+        try:
+            models = response.json().get("models") or []
+        except (ValueError, AttributeError) as exc:
+            raise LLMError(f"malformed /api/ps response from {self._where()}") from exc
+        names = {self.model, f"{self.model}:latest"}
+        for entry in models:
+            if isinstance(entry, dict) and (
+                entry.get("name") in names or entry.get("model") in names
+            ):
+                size = entry.get("size")
+                return int(size) if isinstance(size, int | float) else 0
+        return None
+
+    async def prefill(self, messages: Sequence[Message], tools: Sequence[ToolSpec] = ()) -> Prefill:
+        """Send the request `stream` would send for `messages`, with a one-token limit."""
+        body = self._request_body(messages, tools)
+        body.update(stream=False, max_tokens=1)
+        response = await self._native_call("POST", "/chat/completions", json=body)
+        try:
+            usage = response.json().get("usage") or {}
+        except (ValueError, AttributeError):
+            return Prefill()
+        details = usage.get("prompt_tokens_details") or {}
+        prompt, cached = usage.get("prompt_tokens"), details.get("cached_tokens")
+        return Prefill(
+            prompt_tokens=prompt if isinstance(prompt, int) else None,
+            cached_tokens=cached if isinstance(cached, int) else None,
+        )

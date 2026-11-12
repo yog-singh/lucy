@@ -45,6 +45,12 @@ maintenance schedule), so tests and the eval can simulate weeks. The job queue
 and runner always use the real clock: jobs scheduled at a simulated time in the
 past are simply due.
 
+Model residency (`lucy.core.residency`, `[residency]` in the settings): when the
+chat role's adapter supports it and it is enabled, a `Residency` policy unloads
+the chat model after model work once Lucy is idle and re-warms the next turn's
+prompt prefix, which bounds the model server's memory. It runs as a task from
+`start` to `stop`, with or without `background`.
+
 Learning can never break or slow a chat turn: retrieval runs under a timeout
 and falls back to the profile and instructions only, then to nothing; job
 failures stay inside the runner; and a learning component that fails to start
@@ -74,6 +80,7 @@ from lucy.core.jobs import Handler, Job, JobRunner, JobStatus, utc_now
 from lucy.core.orchestrator import Orchestrator
 from lucy.core.ports import STT, TTS, Embedder, MemoryStore, Tool, TraceSink
 from lucy.core.registry import Registry
+from lucy.core.residency import Residency
 from lucy.core.trace import TurnTrace
 from lucy.core.types import MemoryContext
 from lucy.memory.decay import DecayPolicy
@@ -318,6 +325,8 @@ class LucyApp:
         self._turn_ends: Subscription | None = None
         self._background_tasks: list[asyncio.Task[None]] = []
         self._backlog: JobBacklog | None = None
+        self._residency: Residency | None = None
+        self._residency_task: asyncio.Task[None] | None = None
 
     # --- Public surface ---------------------------------------------------------
 
@@ -379,6 +388,11 @@ class LucyApp:
     def retriever(self) -> Retriever | None:
         """The retriever attached to the memory store, when learning is active."""
         return self._retriever
+
+    @property
+    def residency(self) -> Residency | None:
+        """The model residency policy, when it is running."""
+        return self._residency
 
     @property
     def job_handlers(self) -> Mapping[str, Handler]:
@@ -461,6 +475,7 @@ class LucyApp:
                 trace=trace,
             )
             self._run_task = asyncio.create_task(self._orchestrator.run(), name="lucy-orchestrator")
+            self._start_residency(self._orchestrator)
             if self._background and self.learning_active:
                 self._start_background()
             if self._speech:
@@ -469,11 +484,47 @@ class LucyApp:
             await self.stop()
             raise
         logger.info(
-            "Lucy started (LLM roles: %s; memory learning: %s; tools: %s)",
+            "Lucy started (LLM roles: %s; memory learning: %s; tools: %s; model residency: %s)",
             ", ".join(self._gateway.roles()),
             "active" if self.learning_active else f"off, {self._learning_off}",
             ", ".join(tool.name for tool in self._tools) or "none",
+            self._residency_summary(),
         )
+
+    def _start_residency(self, orchestrator: Orchestrator) -> None:
+        """Run the residency policy if it is enabled and the chat adapter supports it."""
+        config = self.settings.residency
+        assert self._gateway is not None and self._bus is not None
+        if not config.enabled or not Residency.supported(self._gateway):
+            return
+        self._residency = Residency(
+            bus=self._bus,
+            gateway=self._gateway,
+            jobs=self._runner,
+            prefix=orchestrator.next_turn_prefix,
+            idle_seconds=config.idle_seconds,
+            text_quiet_seconds=config.text_quiet_seconds,
+            min_size_bytes=None if config.min_size_gb is None else int(config.min_size_gb * 1e9),
+        )
+        self._residency_task = asyncio.create_task(self._residency.run(), name="lucy-residency")
+
+    def _residency_summary(self) -> str:
+        config = self.settings.residency
+        if self._residency is None:
+            return "off" if not config.enabled else "off, the chat adapter does not support it"
+        rule = f"idle {config.idle_seconds:g}s, text {config.text_quiet_seconds:g}s"
+        if config.min_size_gb is not None:
+            rule += f", from {config.min_size_gb:g} GB"
+        return f"on ({rule})"
+
+    async def _stop_residency(self) -> None:
+        residency, self._residency = self._residency, None
+        task, self._residency_task = self._residency_task, None
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        if residency is not None:
+            await residency.aclose()
 
     @property
     def stt(self) -> STT:
@@ -659,6 +710,7 @@ class LucyApp:
         try:
             if self._bus is not None:
                 self._bus.close()  # no new turns, no new extraction requests
+            await self._stop_residency()
             if self._turn_ends is not None:
                 self._turn_ends.close()
             background, self._background_tasks = self._background_tasks, []
@@ -684,6 +736,7 @@ class LucyApp:
             if self._jobs is not None and self._backlog is None:
                 await self._record_backlog(interrupted)
         finally:
+            await self._stop_residency()
             await self._close_learning()
             gateway, self._gateway = self._gateway, None
             if gateway is not None:

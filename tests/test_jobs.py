@@ -543,3 +543,22 @@ async def test_jobs_run_one_at_a_time_in_due_order(
     await stop(task)
     assert order == [3, 1, 4, 2]
     assert peak == 1
+
+
+async def test_running_and_has_due_report_activity() -> None:
+    clock = FakeClock()
+    store = InMemoryJobStore(clock)
+    seen: list[bool] = []
+    runner: JobRunner
+
+    async def handler(job: Job) -> None:
+        seen.append(runner.running)
+
+    runner = JobRunner(store, {"k": handler}, clock=clock)
+    assert not runner.running and not await runner.has_due()
+    await store.enqueue("k", {}, run_after=clock() + timedelta(seconds=10))
+    assert not await runner.has_due()  # pending, but not due yet
+    clock.advance(10)
+    assert await runner.has_due()  # due, not started
+    assert await runner.run_until_idle() == 1
+    assert seen == [True] and not runner.running and not await runner.has_due()

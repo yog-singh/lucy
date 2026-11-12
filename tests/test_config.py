@@ -8,6 +8,7 @@ from lucy.core.config import (
     LearningSettings,
     LLMRoleConfig,
     LLMSettings,
+    ResidencySettings,
     RetrievalSettings,
     VoiceSettings,
     load_settings,
@@ -72,8 +73,9 @@ def test_loads_example() -> None:
     assert settings.tts == AdapterConfig(
         adapter="ollama", options={"model": "phonon", "voice": "default"}
     )
-    # The example's [voice] section documents the defaults.
+    # The example's [voice] and [residency] sections document the defaults.
     assert settings.voice == VoiceSettings()
+    assert settings.residency == ResidencySettings()
     assert settings.embedder == AdapterConfig(
         adapter="ollama",
         options={
@@ -294,3 +296,50 @@ def test_plain_adapter_configs_are_accepted_as_roles() -> None:
     chat = settings.roles["chat"]
     assert isinstance(chat, LLMRoleConfig) and chat.options == {"model": "m"}
     assert chat.fallback is None
+
+
+def test_context_layout_defaults_to_stable_prefix(tmp_path: Path) -> None:
+    path = tmp_path / "lucy.toml"
+    path.write_text('[llm.roles]\nchat = { adapter = "a" }\n')
+    assert load_settings(path).context.layout == "stable_prefix"
+
+
+def test_context_layout_section(tmp_path: Path) -> None:
+    path = tmp_path / "lucy.toml"
+    path.write_text('[llm.roles]\nchat = { adapter = "a" }\n\n[context]\nlayout = "system"\n')
+    assert load_settings(path).context.layout == "system"
+
+
+@pytest.mark.parametrize("line", ['layout = "sideways"', "colour = 'blue'"])
+def test_invalid_context_section(tmp_path: Path, line: str) -> None:
+    path = tmp_path / "lucy.toml"
+    path.write_text(f'[llm.roles]\nchat = {{ adapter = "a" }}\n\n[context]\n{line}\n')
+    with pytest.raises(ConfigError):
+        load_settings(path)
+
+
+def test_residency_defaults(tmp_path: Path) -> None:
+    path = tmp_path / "lucy.toml"
+    path.write_text('[llm.roles]\nchat = { adapter = "a" }\n')
+    residency = load_settings(path).residency
+    assert residency.enabled and residency.idle_seconds == 1.0
+    assert residency.min_size_gb is None
+
+
+def test_residency_section(tmp_path: Path) -> None:
+    path = tmp_path / "lucy.toml"
+    path.write_text(
+        '[llm.roles]\nchat = { adapter = "a" }\n\n[residency]\n'
+        "enabled = false\nidle_seconds = 2\ntext_quiet_seconds = 30\nmin_size_gb = 12\n"
+    )
+    residency = load_settings(path).residency
+    assert (residency.enabled, residency.idle_seconds) == (False, 2)
+    assert (residency.text_quiet_seconds, residency.min_size_gb) == (30, 12)
+
+
+@pytest.mark.parametrize("line", ["idle_seconds = 0", "min_size_gb = -1", "colour = 'blue'"])
+def test_invalid_residency_section(tmp_path: Path, line: str) -> None:
+    path = tmp_path / "lucy.toml"
+    path.write_text(f'[llm.roles]\nchat = {{ adapter = "a" }}\n\n[residency]\n{line}\n')
+    with pytest.raises(ConfigError):
+        load_settings(path)

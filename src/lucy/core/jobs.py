@@ -155,6 +155,17 @@ class JobRunner:
         self._poll_interval = poll_interval
         self._error_delay = error_delay
         self._wake = asyncio.Event()
+        self._running = 0
+
+    @property
+    def running(self) -> bool:
+        """Whether a job is being claimed or run now (by `run` or `run_until_idle`)."""
+        return self._running > 0
+
+    async def has_due(self) -> bool:
+        """Whether a pending job is due now (it may not have been claimed yet)."""
+        due = await self._store.next_due()
+        return due is not None and due <= self._clock()
 
     def notify(self) -> None:
         """Wake an idle `run` now (call after enqueueing, or when time has moved on)."""
@@ -176,7 +187,7 @@ class JobRunner:
             # Clear before claiming: a notify() from here on wakes the idle wait below.
             self._wake.clear()
             try:
-                job = await self._store.claim(self._clock())
+                job = await self._claim()
                 if job is not None:
                     await self._run_one(job)
                     continue
@@ -198,7 +209,7 @@ class JobRunner:
         pending. Store errors propagate.
         """
         completed = 0
-        while (job := await self._store.claim(self._clock())) is not None:
+        while (job := await self._claim()) is not None:
             if await self._run_one(job):
                 completed += 1
         return completed
@@ -210,8 +221,26 @@ class JobRunner:
             timeout = min(timeout, max((due - self._clock()).total_seconds(), 0.0))
         return timeout
 
+    async def _claim(self) -> Job | None:
+        """Claim the next due job. `running` holds from here until `_run_one` ends."""
+        self._running += 1
+        try:
+            job = await self._store.claim(self._clock())
+        except BaseException:
+            self._running -= 1
+            raise
+        if job is None:
+            self._running -= 1
+        return job
+
     async def _run_one(self, job: Job) -> bool:
-        """Run `job` (already claimed) and record the outcome; True if it completed."""
+        """Run `job` (claimed by `_claim`) and record the outcome; True if it completed."""
+        try:
+            return await self._run_claimed(job)
+        finally:
+            self._running -= 1
+
+    async def _run_claimed(self, job: Job) -> bool:
         handler = self._handlers.get(job.kind)
         if handler is None:
             error = f"no handler registered for job kind {job.kind!r}"

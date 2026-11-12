@@ -100,7 +100,7 @@ async def test_file_mode_continues_the_chat_session(tmp_path: Path) -> None:
     s.out, s.err = io.StringIO(), io.StringIO()
     assert await s.run(parse("--input-wav", str(clip), "--fast")) == 0
     assert "(3 earlier events)" in s.err.getvalue()
-    assert [m.content for m in s.llm.calls[1][1:]] == ["first", "One.", "second"]
+    assert [m.content for m in s.llm.calls[1][1:-1]] == ["first", "One.", "second"]
 
 
 async def test_another_session_can_be_chosen(tmp_path: Path) -> None:

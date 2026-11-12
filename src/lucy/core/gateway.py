@@ -2,7 +2,8 @@
 
 Lane rules:
 
-- FOREGROUND streams never wait.
+- FOREGROUND streams never wait for BACKGROUND streams (only, briefly, for a
+  residency gate; see below).
 - A BACKGROUND stream does not start while any FOREGROUND stream is active; it
   waits until none is.
 - When a FOREGROUND stream starts, every BACKGROUND stream already running is
@@ -39,6 +40,13 @@ fallback produces nothing, `SilentStreamError` is raised. Each fallback is
 logged and recorded for the turn's trace (`fallbacks_in_context`,
 `add_fallbacks`).
 
+Model residency hooks (used by `lucy.core.residency`): listeners added with
+`on_request` are told the role and LLM of every adapter request as it is made,
+and a gate set with `set_foreground_gate` is awaited by each FOREGROUND stream
+after background streams have been pre-empted and before its adapter is asked
+for anything, so a warm-up request already in flight can finish or be
+cancelled first. A gate that raises is logged and ignored.
+
 Answer steps (FOREGROUND only): a role may name an `after_tool` role, which
 then serves that role's streams whose last message is a tool result, e.g. a
 slower but more careful setting of the same model for answering from a lookup.
@@ -52,7 +60,7 @@ import json
 import logging
 import re
 import time
-from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import aclosing
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -318,6 +326,8 @@ class LLMGateway:
         self._background_running: set[_Background] = set()
         self._foreground_idle = asyncio.Event()
         self._foreground_idle.set()
+        self._listeners: list[Callable[[str, LLM], None]] = []
+        self._gate: Callable[[], Awaitable[None]] | None = None
 
     @classmethod
     def from_settings(
@@ -381,6 +391,37 @@ class LLMGateway:
         """Number of BACKGROUND streams currently running (including ones being pre-empted)."""
         return len(self._background_running)
 
+    def on_request(self, listener: Callable[[str, LLM], None]) -> None:
+        """Call `listener(role, llm)` for every adapter request, as it is made."""
+        self._listeners.append(listener)
+
+    def set_foreground_gate(self, gate: Callable[[], Awaitable[None]] | None) -> None:
+        """Await `gate()` at the start of every FOREGROUND stream (None removes it)."""
+        self._gate = gate
+
+    def _open(
+        self,
+        role: str,
+        llm: LLM,
+        messages: Sequence[Message],
+        tools: Sequence[ToolSpec],
+        response_schema: dict[str, Any] | None,
+    ) -> AsyncIterator[LLMChunk]:
+        for listener in self._listeners:
+            try:
+                listener(role, llm)
+            except Exception:
+                logger.exception("a gateway request listener failed")
+        return _open(llm, messages, tools, response_schema)
+
+    async def _pass_gate(self) -> None:
+        if self._gate is None:
+            return
+        try:
+            await self._gate()
+        except Exception:
+            logger.exception("the foreground gate failed; continuing")
+
     async def stream(
         self,
         role: str,
@@ -406,7 +447,7 @@ class LLMGateway:
                 role, llm = answer_role, self._llms[answer_role]
             chunks = self._foreground(role, llm, messages, tools, response_schema)
         else:
-            chunks = self._background(llm, messages, tools, response_schema)
+            chunks = self._background(role, llm, messages, tools, response_schema)
         # Close the lane generator deterministically when this one is closed.
         async with aclosing(chunks):
             async for chunk in chunks:
@@ -425,10 +466,11 @@ class LLMGateway:
         try:
             for background in list(self._background_running):
                 background.preempt()
+            await self._pass_gate()
             fallback = self._fallbacks.get(role)
             timeout = self._first_output_timeouts.get(role)
             if fallback is None and timeout is None:
-                iterator = _open(llm, messages, tools, response_schema)
+                iterator = self._open(role, llm, messages, tools, response_schema)
                 try:
                     async for chunk in iterator:
                         yield chunk
@@ -439,7 +481,7 @@ class LLMGateway:
 
             started = time.monotonic()
             first = _Attempt()
-            iterator = _open(llm, messages, tools, response_schema)
+            iterator = self._open(role, llm, messages, tools, response_schema)
             async with aclosing(_guarded(iterator, timeout, first)) as chunks:
                 async for chunk in chunks:
                     yield chunk
@@ -464,7 +506,7 @@ class LLMGateway:
             )
             _fallbacks.set((*_fallbacks.get(), record))
             second = _Attempt()
-            iterator = _open(self._llms[fallback], messages, tools, response_schema)
+            iterator = self._open(fallback, self._llms[fallback], messages, tools, response_schema)
             timeout = self._first_output_timeouts.get(fallback)
             async with aclosing(_guarded(iterator, timeout, second)) as chunks:
                 async for chunk in chunks:
@@ -481,6 +523,7 @@ class LLMGateway:
 
     async def _background(
         self,
+        role: str,
         llm: LLM,
         messages: Sequence[Message],
         tools: Sequence[ToolSpec],
@@ -494,7 +537,7 @@ class LLMGateway:
             self._background_waiting -= 1
         # No await between the wait above and registering below, so a foreground
         # stream cannot start unnoticed in between.
-        iterator = _open(llm, messages, tools, response_schema)
+        iterator = self._open(role, llm, messages, tools, response_schema)
         running = _Background(iterator)
         self._background_running.add(running)
         try:

@@ -93,12 +93,12 @@ async def test_no_tools_means_no_specs_and_no_guidance(tmp_path: Path) -> None:
     async with LucyApp(make_settings(tmp_path / "lucy.db"), registry=make_registry(llm)) as app:
         await run_turn(app, "Hi")
     assert llm.tools_seen == [[]]
-    system = llm.calls[0][0]
-    assert system.role is Role.SYSTEM
-    # The persona and the current date (the app's clock, as local time with its zone),
-    # nothing else.
-    date = system.content.rsplit("\n\n", 1)[-1]
-    assert system.content == f"{load_prompt('persona').strip()}\n\n{date}"
+    system, _, turn_block = llm.calls[0]
+    assert system.role is Role.SYSTEM and turn_block.role is Role.SYSTEM
+    # The persona alone, and after the message the current date (the app's clock, as
+    # local time with its zone), nothing else.
+    assert system.content == load_prompt("persona").strip()
+    date = turn_block.content
     assert date.startswith("Today is ")
     assert re.search(r" \(UTC[+-]\d\d:\d\d\)\.$", date)
     assert "tool" not in system.content.lower()

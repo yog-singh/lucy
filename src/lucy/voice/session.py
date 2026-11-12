@@ -26,6 +26,13 @@ Turn matching: one subscription serves the whole session. Turns of a session
 run in order, so the n-th `UserMessage` published belongs to the n-th new turn
 id seen; this keeps late events of an abandoned turn away from the next one.
 
+Speech activity: the session publishes `SpeechActivity` (transient, never
+stored) as the listener changes: `speaking` when speech starts, `transcribing`
+when an utterance is complete, `idle` once the transcript has been handed over
+as a `UserMessage` (or turned out empty, failed, or the sound was discarded),
+and `ended` when the session stops. The model residency policy uses it to keep
+the model in memory while the user speaks.
+
 Timings: each turn's moments (speech end, endpoint, transcript, first text,
 first sentence, first TTS audio, first audio played, playback end) are taken on
 the `AudioIO` clock, logged as one line, and appended as one JSON line to
@@ -43,7 +50,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Final, Protocol
+from typing import Any, Final, Literal, Protocol
 
 from lucy.core.bus import EventBus, Subscription
 from lucy.core.config import VoiceSettings
@@ -53,6 +60,7 @@ from lucy.core.events import (
     Interrupt,
     PlaybackInterrupted,
     SentenceReady,
+    SpeechActivity,
     TextDelta,
     ToolStarted,
     TurnEnded,
@@ -307,6 +315,7 @@ class VoiceSession:
         self._stopping = False
         self._bus_closed = False
         self._background: set[asyncio.Task[None]] = set()
+        self._activity: str | None = None
         self.timings: list[TurnTimings] = []
 
     # --- Public surface ------------------------------------------------------------
@@ -329,12 +338,14 @@ class VoiceSession:
         pump = asyncio.create_task(self._pump(self._subscription), name="lucy-voice-events")
         self._main = asyncio.create_task(self._listen(), name="lucy-voice-listen")
         self._set_state(VoiceState.LISTENING)
+        await self._speech_activity("idle")
         try:
             await self._main
         except asyncio.CancelledError:
             if not self._stopping or not self._main.cancelled():
                 raise
         finally:
+            await self._speech_activity("ended")
             if self._player is not None:
                 self._player.stop()
             self._subscription.close()
@@ -409,9 +420,23 @@ class VoiceSession:
                 await self._utterance(event)
             elif isinstance(event, SpeechStarted):
                 logger.debug("speech started at %.2f", event.time)
+                await self._speech_activity("speaking")
                 self._prepare_stt()
             elif isinstance(event, Discarded):
                 logger.debug("ignored a sound: %s", event.reason)
+                await self._speech_activity("idle")
+
+    async def _speech_activity(
+        self, state: Literal["speaking", "transcribing", "idle", "ended"]
+    ) -> None:
+        """Publish `SpeechActivity` when the listener's state changes (not while closed)."""
+        if state == self._activity or self._bus.closed:
+            return
+        self._activity = state
+        try:
+            await self._bus.publish(SpeechActivity(session_id=self._session_id, state=state))
+        except RuntimeError:  # the bus has closed: Lucy is stopping
+            pass
 
     def _prepare_stt(self) -> None:
         """Let the STT adapter get ready while the user is still speaking, if it can
@@ -436,6 +461,7 @@ class VoiceSession:
             forced_endpoint=utterance.forced,
         )
         self._set_state(VoiceState.TRANSCRIBING)
+        await self._speech_activity("transcribing")
         replied = False
         try:
             try:
@@ -455,6 +481,7 @@ class VoiceSession:
             replied = True
             await self._converse(text, timings)
         finally:
+            await self._speech_activity("idle")
             self._record(timings)
             self._listen_again(gate=replied)
 
@@ -489,6 +516,7 @@ class VoiceSession:
             await self._bus.publish(
                 UserMessage(session_id=self._session_id, text=text, source="voice")
             )
+            await self._speech_activity("idle")
             while not turn.interrupted:
                 event = await turn.events.get()
                 if event is _Signal.INTERRUPTED:

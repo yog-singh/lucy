@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from lucy.app import LucyApp
-from lucy.core.config import AdapterConfig, LLMSettings, Settings
+from lucy.core.config import AdapterConfig, ContextSettings, LLMSettings, Settings
 from lucy.core.events import Event, TextDelta, TurnEnded, UserMessage
 from lucy.core.registry import Registry, RegistryError
 from lucy.core.types import FinishReason, LLMChunk, Role
@@ -75,7 +75,9 @@ async def test_conversation_survives_a_restart(tmp_path: Path) -> None:
     # The third turn saw the whole earlier conversation, rebuilt from the database.
     (messages,) = second.calls
     assert messages[0].role is Role.SYSTEM and "Lucy" in messages[0].content
-    assert [(m.role, m.content) for m in messages[1:]] == [
+    # The date follows the latest message ("stable_prefix" layout, the default).
+    assert messages[-1].role is Role.SYSTEM and messages[-1].content.startswith("Today is")
+    assert [(m.role, m.content) for m in messages[1:-1]] == [
         (Role.USER, "Hi, I am Sam."),
         (Role.ASSISTANT, "Nice to meet you, Sam."),
         (Role.USER, "My favourite colour is blue."),
@@ -93,6 +95,25 @@ async def test_conversation_survives_a_restart(tmp_path: Path) -> None:
     async with SQLiteMemoryStore(db) as store:
         trace = await store.get_trace(ended.turn_id or "")
     assert trace is not None and trace.steps[0].messages == messages
+
+
+async def test_context_layout_setting_reaches_the_prompt(tmp_path: Path) -> None:
+    """With `stable_prefix` the date leaves the system message and follows the user's;
+    what is stored is still exactly what the user said."""
+    db = tmp_path / "lucy.db"
+    llm = FakeLLM([reply("Hello.")])
+    settings = make_settings(db).model_copy(
+        update={"context": ContextSettings(layout="stable_prefix")}
+    )
+    async with LucyApp(settings, registry=make_registry(llm)) as app:
+        await run_turn(app, "Hi.")
+        stored = await app.memory.recent_episodes("s", 10)
+    (messages,) = llm.calls
+    assert [m.role for m in messages] == [Role.SYSTEM, Role.USER, Role.SYSTEM]
+    assert "Today is" not in messages[0].content
+    assert messages[1].content == "Hi."
+    assert messages[2].content.startswith("Today is")
+    assert [e.text for e in stored if isinstance(e, UserMessage)] == ["Hi."]
 
 
 async def test_a_fallback_is_recorded_in_the_turn_trace(tmp_path: Path) -> None:

@@ -16,6 +16,7 @@ from lucy.core.types import (
     LLMChunk,
     MemoryContext,
     Message,
+    Prefill,
     Risk,
     ToolOutput,
     ToolSpec,
@@ -112,6 +113,59 @@ class FakeLLM:
         finally:
             self.open_streams -= 1
             self.exits.append(outcome)
+
+
+class ModelServer:
+    """A model server as the residency calls (`ResidentLLM`) see it, shared by fake
+    adapters. `hold` pauses a call by name, `fail` makes it raise."""
+
+    def __init__(self, size: int | None = 14_000_000_000) -> None:
+        self.size: int | None = size
+        self.calls: list[str] = []
+        self.prefills: list[list[Message]] = []
+        self.fail: dict[str, Exception] = {}
+        self.hold: dict[str, Pause] = {}
+
+    async def act(self, name: str) -> None:
+        self.calls.append(name)
+        if name in self.hold:
+            pause = self.hold[name]
+            pause.reached.set()
+            await pause.release.wait()
+        if name in self.fail:
+            raise self.fail[name]
+
+
+class ResidentFake(FakeLLM):
+    """A scripted LLM that also implements `ResidentLLM` against a `Server`."""
+
+    def __init__(self, server: ModelServer, responses: Sequence[Any] = (), *, key: str = "srv|m"):
+        super().__init__(responses)
+        self.capabilities = self.capabilities.model_copy(update={"residency": True})
+        self.server = server
+        self._key = key
+
+    @property
+    def residency_key(self) -> str:
+        return self._key
+
+    async def unload(self) -> None:
+        await self.server.act("unload")
+        self.server.size = None
+
+    async def load(self) -> None:
+        await self.server.act("load")
+        self.server.size = 8_000_000_000
+
+    async def loaded_size(self) -> int | None:
+        await self.server.act("size")
+        return self.server.size
+
+    async def prefill(self, messages: Sequence[Message], tools: Sequence[ToolSpec] = ()) -> Prefill:
+        await self.server.act(f"prefill:{messages[-1].content}")
+        self.server.prefills.append(list(messages))
+        self.server.size = 9_000_000_000
+        return Prefill(prompt_tokens=10 * len(messages), cached_tokens=0)
 
 
 def adapter_for(instance: Any) -> type[Any]:

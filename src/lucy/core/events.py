@@ -153,6 +153,25 @@ class TurnEnded(Event):
     error: str | None = None
 
 
+# --- Transient ----------------------------------------------------------------
+
+
+class SpeechActivity(Event):
+    """What a voice client's listener is doing, for components that must not get in
+    the way of speech (the model residency policy, `lucy.core.residency`).
+
+    `speaking`: the user has started speaking; `transcribing`: the utterance is
+    being transcribed; `idle`: neither (listening, or the turn has been handed
+    over as a `UserMessage`); `ended`: the voice session has stopped.
+
+    Transient: it is not one of `AnyEvent`, so it is never written to the
+    episode log, and it has no `turn_id`.
+    """
+
+    type: Literal["speech_activity"] = "speech_activity"
+    state: Literal["speaking", "transcribing", "idle", "ended"]
+
+
 INBOUND_EVENTS: tuple[type[Event], ...] = (
     UserMessage,
     Interrupt,

@@ -165,12 +165,35 @@ class MemoryContext(_Frozen):
 
 
 class LLMCaps(_Frozen):
-    """What an LLM adapter's model supports."""
+    """What an LLM adapter's model supports.
+
+    `residency`: the adapter can unload its model from the server, load it
+    without generating, report its loaded size and pre-fill a prompt
+    (`lucy.core.ports.ResidentLLM`), so Lucy can bound the server's memory
+    (`lucy.core.residency`). Off unless an adapter declares it.
+    """
 
     native_tools: bool
     json_schema: bool
     streaming: bool
     context_window: int = Field(gt=0)
+    residency: bool = False
+
+
+class Prefill(_Frozen):
+    """What a pre-fill request (`ResidentLLM.prefill`) cost the server, when it says."""
+
+    prompt_tokens: int | None = None
+    cached_tokens: int | None = None
+
+
+class PromptPrefix(_Frozen):
+    """How the next turn's first model request will start: the `role` it goes to, its
+    first `messages` (everything before the new user message) and the `tools` offered."""
+
+    role: str
+    messages: list[Message]
+    tools: list[ToolSpec] = Field(default_factory=list)
 
 
 class STTCaps(_Frozen):

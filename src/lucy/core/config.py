@@ -287,11 +287,33 @@ class ContextSettings(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    layout: ContextLayout = "system"
+    layout: ContextLayout = "stable_prefix"
     """`"system"`: the date and retrieved memories in the system message, before the
     history. `"stable_prefix"`: only what rarely changes before the history, and the
     date and memories with the latest user message, so each turn's prompt extends
     the previous one and the model server can reuse its cache."""
+
+
+class ResidencySettings(BaseModel):
+    """Bounding the chat model's memory on its server (`lucy.core.residency`).
+
+    Takes effect only when the chat role's adapter supports it
+    (`LLMCaps.residency`: the `ollama` adapter). When Lucy has been idle for
+    `idle_seconds` after model work (and, outside voice, nobody has sent a
+    message for `text_quiet_seconds`), the model is unloaded, which frees the
+    server's prompt cache, then loaded again and the next turn's prompt prefix
+    pre-filled, so the next turn still starts warm.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    enabled: bool = True
+    idle_seconds: float = Field(default=1.0, ge=0.1, le=600)
+    """Nothing running or due (no turn, speech, model request or job) for this long."""
+    text_quiet_seconds: float = Field(default=10.0, ge=0, le=3600)
+    """Outside a voice session, also this long since the last turn ended."""
+    min_size_gb: float | None = Field(default=None, gt=0)
+    """Optional: unload only when the loaded model takes at least this many GB."""
 
 
 class Settings(BaseModel):
@@ -309,6 +331,7 @@ class Settings(BaseModel):
     tools: ToolsSettings = Field(default_factory=ToolsSettings)
     voice: VoiceSettings = Field(default_factory=VoiceSettings)
     context: ContextSettings = Field(default_factory=ContextSettings)
+    residency: ResidencySettings = Field(default_factory=ResidencySettings)
 
 
 def load_settings(path: str | Path) -> Settings:

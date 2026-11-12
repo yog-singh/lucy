@@ -100,11 +100,12 @@ async def test_learns_in_the_background_and_recalls_in_another_session(tmp_path:
     assert no_other_tasks()
 
     # The second turn came from another session, so conversation replay could not
-    # supply the fact: it reached the model through retrieval, in the system prompt.
-    system, *rest = models.chat_llm.calls[1]
-    assert system.role is Role.SYSTEM
-    assert "Things you remember" in system.content and DOG in system.content
-    assert [m.content for m in rest] == ["What is my dog called?"]
+    # supply the fact: it reached the model through retrieval, in the per-turn block
+    # after the user's message ("stable_prefix" layout, the default).
+    *_, user, block = models.chat_llm.calls[1]
+    assert user.role is Role.USER and block.role is Role.SYSTEM
+    assert "Things you remember" in block.content and DOG in block.content
+    assert user.content == "What is my dog called?" and len(models.chat_llm.calls[1]) == 3
     # The extraction model saw the first turn; the statement's source is its user message.
     assert "I have a dog called Rex." in models.extraction_llm.calls[0][1].content
     assert models.chat_llm.aclose_calls == 1 and models.extraction_llm.aclose_calls == 1
@@ -149,7 +150,7 @@ async def test_no_embedder_gives_the_old_behaviour(
     assert lines == [
         "memory learning is off (no [embedder] configured): chat replays the conversation only"
     ]
-    assert "Things you remember" not in models.chat_llm.calls[0][0].content
+    assert not any("Things you remember" in m.content for m in models.chat_llm.calls[0])
     assert no_other_tasks()
 
 
