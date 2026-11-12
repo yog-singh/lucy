@@ -36,6 +36,21 @@ Voice-activity detection, endpointing, audio I/O and playback are client-side si
 2. **Barge-in.** Speaking over Lucy stops her. With speakers this needs echo cancellation, or she hears herself; with headphones it does not. Capture and playback move into one duplex stream so the echo canceller gets the exact audio being played, time-aligned.
 3. **Wake word.** "Hey Lucy" starts a turn without the keyboard.
 
+### Stage 3 so far: `lucy listen` with a stand-in wake word
+
+Built on 2026-11-13 ([ADR 0018](adr/0018-wake-word-listener.md)) ahead of stage 2, because it does not depend on barge-in. It uses the pretrained "hey jarvis" model; a custom "Hey Lucy" model and running at login are still to do. Verified through audio files only.
+
+| | Result |
+|---|---|
+| Waiting footprint | 1.75% of one core, 67 MB (idle `lucy voice`: 1,604 MB) |
+| Positives detected (synthesised, 8 voices) | 8 of 8, scores 0.997 to 0.999 |
+| Negatives that woke Lucy | 3 of 12: "Hey Charles" in one voice (0.985), a sentence containing "Jarvis" (0.992), "Hey Travis" (0.568) |
+| "Hey Lucy", ordinary sentences, Lucy's own replies, silence | 0.000 |
+| Cold wake: wake phrase to first audio | about 3 s (1.6 s of loading overlaps the request) |
+| Follow-up turn: end of speech to first audio | 1.57 s |
+
+In the end-to-end run, "Hey Jarvis, what's the capital of Portugal?" was detected mid-sentence, transcribed with the phrase removed, and answered; a follow-up without the phrase was answered inside the eight-second window; a sentence after the window closed was ignored and never transcribed.
+
 ## Speech stack
 
 Chosen from measurements on the target machine (Apple M5 Pro, 24 GB), with the chat model running. The full tables are in the journal entry of 2026-11-12.

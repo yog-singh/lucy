@@ -15,7 +15,14 @@ Dated notes on what was built, what failed and what changed. Newest first.
 - Stale answers: the source is replayed history, not memory. `lucy chat` and `lucy voice` continue the session `cli` across runs, so an old answer is replayed and history carries no timestamps. One sentence added to the tool guidance; a stale-news case went from 1 of 4 to 4 of 4, and the weather cases already passed.
 - Found and fixed: the eval runner's "memory given" diagnostic read only the first system message and would have reported "none" under the new layout.
 - Open: fast text chat is not bounded; a long first turn after an unload can cost a few seconds; history messages have no dates.
-- Planned next, discussed with the user: a lightweight wake-word listener (stage 3 of voice), using openWakeWord's ONNX models with a custom "Hey Lucy" model.
+- PR 2 merged by the user, who also reported that the real-microphone test of `lucy voice` went fine.
+- At the user's request, sub-agents now get an explicit time budget and narrow scope. The two below ran about 20 minutes each.
+- Wake-word listener, step 1 (`lucy listen`, ADR 0018), built by a sub-agent with the pretrained "hey jarvis" model: `voice/wakeword.py` (detector, model download with pinned hashes) and `voice/wake.py` (waiting stage, phrase stripping, chimes, state machine). 1628 tests pass. Measurements are in `voice.md`. The notable finding is false wakes on near-miss names in synthesised speech (3 of 12 negatives).
+  - Not done: training "Hey Lucy", running at login, tuning the threshold, any real-microphone trial.
+  - Found: in file mode with `--wait-for-reply`, an input file ending in more than about 0.6 s of silence makes the next file wait for a later playback; this affects `lucy voice` file mode too.
+- Measurement checks moved into the repo by a sub-agent: `checks/` holds grounding, tool choice, extraction and the voice run, each runnable from the repo root, with `checks/README.md` giving commands, durations and recorded baselines. Smoke runs only.
+  - The grounding check now uses the configured prompt layout (it had the old one hard-coded and passed an option that no longer exists); recorded baselines before this date used the old layout unless stated.
+  - Known flaws listed in the README: two tool-choice cases depend on the date they run; the options used for older grounding baselines were not recorded.
 
 ## 2026-11-12: leftovers, voice design, tools started
 
