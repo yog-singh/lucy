@@ -1,0 +1,82 @@
+[
+ {
+  "id": "t01_greeting",
+  "engine": "say",
+  "voice": "Samantha",
+  "text": "Hi Lucy, good morning.",
+  "file": "t01_greeting.wav",
+  "seconds": 3.9
+ },
+ {
+  "id": "t02_fact_job",
+  "engine": "phonon",
+  "voice": "Hadley",
+  "text": "My name is Tomas, and I work as a marine biologist in Lisbon.",
+  "file": "t02_fact_job.wav",
+  "seconds": 6.66
+ },
+ {
+  "id": "t03_question",
+  "engine": "say",
+  "voice": "Daniel",
+  "text": "What's the tallest mountain in Africa?",
+  "file": "t03_question.wav",
+  "seconds": 4.27
+ },
+ {
+  "id": "t04_fact_dog",
+  "engine": "phonon",
+  "voice": "Juniper",
+  "text": "I have a dog called Biscuit. She's a three year old beagle.",
+  "file": "t04_fact_dog.wav",
+  "seconds": 5.57
+ },
+ {
+  "id": "t05_followup",
+  "engine": "say",
+  "voice": "Karen",
+  "text": "What did I say my dog's name was?",
+  "file": "t05_followup.wav",
+  "seconds": 4.3
+ },
+ {
+  "id": "t06_rambling",
+  "engine": "phonon",
+  "voice": "Hadley",
+  "text": "So I was thinking that maybe this weekend I could take Biscuit up into the hills near Sintra, but only if the weather holds up, and I also need to remember to pick up some groceries on the way back because the fridge is basically empty.",
+  "file": "t06_rambling.wav",
+  "seconds": 15.4
+ },
+ {
+  "id": "t07_opinion",
+  "engine": "say",
+  "voice": "Moira",
+  "text": "Do you think that's a good plan?",
+  "file": "t07_opinion.wav",
+  "seconds": 3.91
+ },
+ {
+  "id": "t08_yes",
+  "engine": "say",
+  "voice": "Samantha",
+  "text": "Yes.",
+  "file": "t08_yes.wav",
+  "seconds": 2.79
+ },
+ {
+  "id": "t09_recall_job",
+  "engine": "phonon",
+  "voice": "Juniper",
+  "text": "Can you remind me what I do for work?",
+  "file": "t09_recall_job.wav",
+  "seconds": 4.32
+ },
+ {
+  "id": "t10_bye",
+  "engine": "say",
+  "voice": "Daniel",
+  "text": "Thanks Lucy, that's all for now.",
+  "file": "t10_bye.wav",
+  "seconds": 4.57
+ }
+]
