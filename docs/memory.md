@@ -249,6 +249,7 @@ All LLM roles use `gemma4:12b-mlx` with thinking off; the embedder is `embedding
 - A single choice or order produces nothing. A preference is stored only when stated as one ("I always", "I can't stand"). A short-term plan is not a goal and produces nothing.
 - A new person or thing must come with a statement linking it to the user; unlinked new entities are logged.
 - A change of state is stored as the new state ("lives in Porto"), which supersedes the old one. The old statement ends at the date the user gave, or the date of the message, never the processing time.
+- A candidate that is worded as a change ("switched to decaf") gets one dedicated reconcile call: it sees the subject's statements down to a lower similarity (0.76), rewrites the change as the new state in the form of the statement it replaces ("drinks decaf"), and supersedes the old one. A change that only says what ended ("left Brightline") is kept as it is.
 - Giving something up is stored as a fact, and closes the goal and related habits.
 - Code guard rails override the model: an inference never supersedes a stated statement; a statement is never superseded by one about a different subject; statements from the same turn are not reconciled against each other; near-identical additions become reinforcements.
 - Confidence: stated starts at 0.9, inferred at 0.4, and each reinforcement moves it a quarter of the way to 1.0.
@@ -285,16 +286,23 @@ Do not run `work`, `correct`, `forget` or `rebuild` while `lucy chat` is open on
 
 ### Evaluation
 
-`lucy eval` runs 17 scripted scenarios against the configured models on a temporary database with a simulated clock, grades by keywords and graph checks, and saves a JSON report under `data/evals/` for comparison with `--compare`. Result on 2026-11-12: 16 of 17 scenarios (recall 3/3, update 3/3, inference 2/3, restraint 3/3, forgetting 3/3, correction 1/1, decay 1/1). Results vary between runs: two scenarios that failed in one run passed in the next.
+`lucy eval` runs 18 scripted scenarios against the configured models on a temporary database with a simulated clock, grades by keywords and graph checks, and saves a JSON report under `data/evals/` for comparison with `--compare`.
+
+- First full run, 2026-11-12, 17 scenarios: 16 passed. The failure was a scenario whose messages stated the habit outright while expecting it to be inferred; the scenario was rewritten and a separate one added for stated habits.
+- Second full run, 18 scenarios: 16 passed. Failures: `recall_after_weeks` (passes 2 of 3 when re-run alone) and `update_preference_change`, where "switched to decaf" was stored as a change and superseded nothing. That was fixed in the reconciler.
+- Latest full run, 18 scenarios: 17 passed. The failure is `recall_after_weeks`, which is intermittent.
+- Results vary between runs, so compare runs and re-run a failing scenario alone before concluding.
 
 ### Known limits
 
-- The one failing scenario: after the user mentions calling their mother on Sundays, extraction stores it as a stated habit, so reflection does not infer it from the pattern.
+- When extraction writes a new state itself but its wording is not similar enough to the old one, the old statement stays current: "works at Corvid Labs" against "works at Fernhill Bank" scores 0.82, under the 0.84 floor, so both employers remain.
+- An ending fact can remain beside the new state ("stopped driving to the office" next to "cycles to the office").
+- On open questions ("who do I call on Sundays?") the chat model often states an unconfirmed inference as fact; it hedges more reliably on yes/no questions.
 - A preference shown only through repeated choices of one kind (always the window seat) was not inferred in testing.
 - When ending an activity, only habits and goals that resemble it or share a keyword are closed.
 - Forgetting leaves turns that repeated the information without producing a statement; `forget` lists them in its preview.
-- The profile writer once assumed the user's gender, and the chat model sometimes claims to have "added that to your profile".
-- The check for invented content in profiles and summaries catches only invented names and numbers.
+- The check for invented content in profiles catches invented names and numbers, and gendered pronouns when no statement mentions that gender. It does not work out who a pronoun refers to.
+- The chat prompt's history file (`chat_history` beside the database) keeps what the user typed; `lucy memory forget` does not remove text from it.
 
 ## Open questions
 
