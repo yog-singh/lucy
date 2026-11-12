@@ -177,3 +177,50 @@ max_redirects       = 5
 [tools.weather]
 # "metric" (°C, km/h, mm) or "imperial" (°F, mph, inches).
 units = "metric"
+
+[context]
+# Optional; this is the default. How the chat prompt is arranged.
+# "stable_prefix": the system message holds only what rarely changes (persona,
+# tool guidance, standing instructions, profile), then the conversation; the
+# date and time and the memories retrieved for this message follow the latest
+# message. Each turn's prompt then extends the previous one, so the model
+# server reuses its cached work (voice: 1.30 s from the end of speech to the
+# first audio, against 1.62 s), and the start of the next prompt can be
+# prepared in advance ([residency]). Nothing stored changes. Measured with
+# gemma4:12b-mlx, it answered as well as "system" on Lucy's grounding check,
+# tool-choice regression and memory evaluation.
+# "system": everything, including the date and the memories, in one system
+# message before the conversation; the server reprocesses the whole
+# conversation on every turn. Kept so a change can be reverted here.
+layout = "stable_prefix"
+
+[residency]
+# Optional; these are the defaults. Keeps the chat model's memory on the model
+# server bounded. Ollama's MLX runner keeps a prompt cache that grows by about
+# 1 GB per request up to about 16 GB, and no setting limits it; unloading the
+# model frees it. So once Lucy has been idle for a moment after model work, she
+# unloads the chat model, loads it again at once and pre-fills the start of
+# the next turn's prompt, so the next reply still starts quickly. Measured with
+# gemma4:12b-mlx in voice: the model stayed at about 8.4 GB (10 GB at most)
+# instead of 14 to 16 GB, with the time to the first spoken word unchanged.
+# It works with the `ollama` adapter only (others ignore this section) and
+# needs the "stable_prefix" layout above to pre-fill anything; with "system"
+# the model is only reloaded. Unloading frees the model for every client of
+# the server, so another program using the same model at that moment would
+# have to wait for it to load again.
+enabled            = true
+# Nothing running or due (no turn, speech, model request or background job)
+# for this many seconds. In voice this is all: the unload and re-warm happen
+# while Lucy's reply is still playing.
+idle_seconds       = 1.0
+# Outside a voice session, also wait this long after Lucy's last reply. In
+# text chat the re-warm takes 5 to 8 s for a long conversation, and a message
+# that arrives before it has finished starts slower. Measured over 20 turns:
+# with 8 s between messages nothing is unloaded (no turn is slowed; the model
+# grows as it would without this policy); with 20 s between messages the model
+# stays at about 10 GB and the first word comes after 0.36 s (median). 15
+# would collide with replies sent about 20 s apart (first word 3.3 s median).
+text_quiet_seconds = 10.0
+# Unload only when the model takes at least this many GB. Unset: whenever the
+# rules above allow. 10 to 12 keeps it loaded longer at the cost of memory.
+# min_size_gb = 12

@@ -19,6 +19,7 @@ from lucy.core.types import (
     LLMChunk,
     MemoryContext,
     Message,
+    Prefill,
     Risk,
     STTCaps,
     ToolOutput,
@@ -52,6 +53,37 @@ class LLM(Protocol):
         `capabilities.json_schema` is true accept it; others raise. Callers
         normally use `LLMGateway.generate`, which falls back to prompting.
         """
+        ...
+
+
+@runtime_checkable
+class ResidentLLM(LLM, Protocol):
+    """An LLM whose model a server keeps loaded, and which can manage that
+    (`capabilities.residency`; used by `lucy.core.residency`).
+
+    All of these talk to the model server only; none generates visible output.
+    """
+
+    @property
+    def residency_key(self) -> str:
+        """Identifies the loaded model: adapters (roles) with the same key share it."""
+        ...
+
+    async def unload(self) -> None:
+        """Ask the server to unload the model now, freeing its memory."""
+        ...
+
+    async def load(self) -> None:
+        """Load the model without generating anything."""
+        ...
+
+    async def loaded_size(self) -> int | None:
+        """Bytes the loaded model occupies on the server; None when it is not loaded."""
+        ...
+
+    async def prefill(self, messages: Sequence[Message], tools: Sequence[ToolSpec] = ()) -> Prefill:
+        """Process `messages` (offering `tools`, rendered exactly as `stream` would)
+        with a one-token limit, so the server caches the prompt; the output is discarded."""
         ...
 
 

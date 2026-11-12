@@ -39,7 +39,15 @@ from lucy.core.history import events_to_messages, tool_message
 from lucy.core.ports import MemoryStore, Tool, TraceSink, tool_spec
 from lucy.core.sentences import SentenceSplitter
 from lucy.core.trace import StepTrace, TurnTrace
-from lucy.core.types import FinishReason, Message, Risk, Role, ToolCall, ToolResult
+from lucy.core.types import (
+    FinishReason,
+    Message,
+    PromptPrefix,
+    Risk,
+    Role,
+    ToolCall,
+    ToolResult,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +174,37 @@ class Orchestrator:
         finally:
             self._subscription.close()
             await self._shutdown()
+
+    async def next_turn_prefix(self, session_id: str) -> PromptPrefix | None:
+        """How the next turn of `session_id` will begin its first model request: the
+        messages before the new user message, the role and the tools offered.
+
+        None when the context layout has no prefix that stays the same from turn
+        to turn (`ContextBuilder.prefix_messages`) or the session has no history.
+        The conversation is rebuilt as the next turn will rebuild it: the same
+        window of stored episodes plus a placeholder for the coming user message
+        (so the last turn's tool results are already shortened, as they will be
+        then), with the current profile and standing instructions. Nothing is
+        stored or published. Used to pre-fill the model server's cache
+        (`lucy.core.residency`).
+        """
+        if self._context.layout != "stable_prefix":
+            return None
+        episodes = await self._memory.recent_episodes(session_id, self._history_limit)
+        if not episodes:
+            return None
+        placeholder = UserMessage(session_id=session_id, text="")
+        history = events_to_messages([*episodes, placeholder][-self._history_limit :])
+        window = self._gateway.for_role(self._chat_role).capabilities.context_window
+        budget = self._context.token_budgets(window)["memories"]
+        query = next((e.text for e in reversed(episodes) if isinstance(e, UserMessage)), "")
+        memory = await self._memory.retrieve(query=query, budget=budget)
+        built = self._context.build(memory=memory, history=history, context_window=window)
+        return PromptPrefix(
+            role=self._chat_role,
+            messages=self._context.prefix_messages(built),
+            tools=list(self._tool_specs),
+        )
 
     # --- Scheduling -----------------------------------------------------------
 

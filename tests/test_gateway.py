@@ -787,3 +787,61 @@ async def consume_messages(
     gateway: LLMGateway, messages: list[Message], priority: Priority
 ) -> list[str]:
     return [c.text or "" async for c in gateway.stream("chat", messages, priority=priority)]
+
+
+# --- Residency hooks -------------------------------------------------------------
+
+
+async def drain(stream: AsyncIterator[LLMChunk]) -> str:
+    out = ""
+    async with aclosing(stream) as chunks:  # type: ignore[type-var]
+        async for chunk in chunks:
+            out += chunk.text or ""
+    return out
+
+
+async def test_request_listeners_see_every_adapter_request() -> None:
+    silent = [LLMChunk(finish_reason=FinishReason.STOP)]
+    chat, deep = FakeLLM([silent]), FakeLLM([reply("deep"), reply("bg")])
+    gateway = LLMGateway(
+        {"chat": chat, "chat_deep": deep},
+        fallbacks={"chat": "chat_deep"},
+        first_output_timeouts={"chat": 5},
+    )
+    seen: list[tuple[str, object]] = []
+    gateway.on_request(lambda role, llm: seen.append((role, llm)))
+    gateway.on_request(lambda role, llm: 1 / 0)  # a failing listener is logged, not fatal
+    assert await drain(gateway.stream("chat", [])) == "deep"
+    assert await drain(gateway.stream("chat_deep", [], priority=Priority.BACKGROUND)) == "bg"
+    assert seen == [("chat", chat), ("chat_deep", deep), ("chat_deep", deep)]
+
+
+async def test_the_foreground_gate_runs_before_the_adapter_is_asked() -> None:
+    llm = FakeLLM([reply("hi"), reply("bg")])
+    gateway = LLMGateway({"chat": llm})
+    release = asyncio.Event()
+    entered = asyncio.Event()
+
+    async def gate() -> None:
+        entered.set()
+        await release.wait()
+
+    gateway.set_foreground_gate(gate)
+    task = asyncio.create_task(drain(gateway.stream("chat", [])))
+    await entered.wait()
+    assert llm.calls == [] and gateway.foreground_active == 1
+    release.set()
+    assert await task == "hi"
+    # Background streams are not gated.
+    assert await drain(gateway.stream("chat", [], priority=Priority.BACKGROUND)) == "bg"
+
+
+async def test_a_failing_gate_is_ignored(caplog: pytest.LogCaptureFixture) -> None:
+    gateway = LLMGateway({"chat": FakeLLM([reply("hi")])})
+
+    async def gate() -> None:
+        raise RuntimeError("broken gate")
+
+    gateway.set_foreground_gate(gate)
+    assert await drain(gateway.stream("chat", [])) == "hi"
+    assert "foreground gate failed" in caplog.text

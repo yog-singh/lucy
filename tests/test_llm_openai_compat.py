@@ -711,3 +711,139 @@ async def test_live_ollama_structured_output(model: str) -> None:
     finally:
         await llm.aclose()
     Extraction.model_validate_json(texts(chunks))
+
+
+# --- Model residency (Ollama only) ---------------------------------------------
+
+
+def ps_body(*models: tuple[str, int]) -> dict[str, Any]:
+    return {"models": [{"name": n, "model": n, "size": size} for n, size in models]}
+
+
+class FakeOllama:
+    """Answers the native API like Ollama 0.40.16; the model leaves memory after
+    `polls_until_gone` /api/ps polls once it was asked to unload."""
+
+    def __init__(self, loaded: bool = True, polls_until_gone: int = 2) -> None:
+        self.loaded = loaded
+        self.unloading = False
+        self.polls_until_gone = polls_until_gone
+        self.status = 200
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        if self.status != 200:
+            return httpx.Response(self.status, json={"error": "boom"})
+        path = request.url.path
+        if path == "/api/ps":
+            if self.unloading:
+                self.polls_until_gone -= 1
+                if self.polls_until_gone <= 0:
+                    self.loaded = self.unloading = False
+            return httpx.Response(
+                200,
+                json=ps_body(("gemma4:12b-mlx", 7_750_000_000)) if self.loaded else {"models": []},
+            )
+        if path == "/api/generate":
+            body = json.loads(request.content)
+            if body.get("keep_alive") == 0:
+                self.unloading = True
+            else:
+                self.loaded = True
+            return httpx.Response(200, json={"model": body["model"], "done": True})
+        if path == "/v1/chat/completions":
+            usage = {
+                "prompt_tokens": 1867,
+                "completion_tokens": 1,
+                "prompt_tokens_details": {"cached_tokens": 4},
+            }
+            return httpx.Response(200, json={"choices": [], "usage": usage})
+        return httpx.Response(404)
+
+
+def test_only_the_ollama_adapter_declares_residency() -> None:
+    from lucy.core.ports import ResidentLLM
+
+    ollama = OllamaLLM(model="m")
+    generic = OpenAICompatLLM(model="m", base_url="http://localhost:11434/v1")
+    assert ollama.capabilities.residency and isinstance(ollama, ResidentLLM)
+    assert not generic.capabilities.residency
+    assert ollama.residency_key == "http://localhost:11434|m"
+    other = OllamaLLM(model="m", base_url="http://other:11434/v1")
+    assert other.residency_key != ollama.residency_key
+
+
+async def test_unload_sends_keep_alive_zero_and_waits_until_gone() -> None:
+    server = FakeOllama()
+    llm, requests = make_llm(server)
+    await llm.unload()  # type: ignore[attr-defined]
+    first = requests[0]
+    assert str(first.url) == "http://localhost:11434/api/generate"
+    assert json.loads(first.content) == {"model": "gemma4:12b-mlx", "keep_alive": 0}
+    assert [r.url.path for r in requests[1:]] == ["/api/ps", "/api/ps"]
+    assert not server.loaded
+
+
+async def test_unload_gives_up_when_the_model_stays(monkeypatch: pytest.MonkeyPatch) -> None:
+    import lucy.adapters.llm_openai_compat as module
+
+    monkeypatch.setattr(module, "UNLOAD_WAIT_SECONDS", 0.05)
+    llm, _ = make_llm(FakeOllama(polls_until_gone=10_000))
+    with pytest.raises(LLMError, match="still lists"):
+        await llm.unload()  # type: ignore[attr-defined]
+
+
+async def test_load_asks_for_the_model_without_a_prompt() -> None:
+    server = FakeOllama(loaded=False)
+    llm, requests = make_llm(server)
+    await llm.load()  # type: ignore[attr-defined]
+    assert requests[0].url.path == "/api/generate"
+    assert json.loads(requests[0].content) == {"model": "gemma4:12b-mlx"}
+    assert server.loaded
+
+
+async def test_loaded_size_reads_the_process_status() -> None:
+    server = FakeOllama()
+    llm, requests = make_llm(server)
+    assert await llm.loaded_size() == 7_750_000_000  # type: ignore[attr-defined]
+    assert str(requests[0].url) == "http://localhost:11434/api/ps"
+    server.loaded = False
+    assert await llm.loaded_size() is None  # type: ignore[attr-defined]
+
+
+async def test_loaded_size_matches_an_implicit_latest_tag() -> None:
+    llm, _ = make_llm(
+        lambda r: httpx.Response(200, json=ps_body(("phonon:latest", 5))), model="phonon"
+    )
+    assert await llm.loaded_size() == 5  # type: ignore[attr-defined]
+
+
+async def test_prefill_sends_the_chat_request_with_a_one_token_limit() -> None:
+    llm, requests = make_llm(
+        FakeOllama(), hidden_loop_repeats=4, extra={"reasoning_effort": "none", "max_tokens": 1024}
+    )
+    usage = await llm.prefill(USER, [WEATHER])  # type: ignore[attr-defined]
+    assert (usage.prompt_tokens, usage.cached_tokens) == (1867, 4)
+    sent = json.loads(requests[0].content)
+    streamed = llm._request_body(USER, [WEATHER])
+    assert str(requests[0].url) == "http://localhost:11434/v1/chat/completions"
+    assert sent == {**streamed, "stream": False, "max_tokens": 1}
+    assert sent["messages"] == streamed["messages"] and sent["tools"] == streamed["tools"]
+
+
+@pytest.mark.parametrize("call", ["unload", "load", "loaded_size", "prefill"])
+async def test_residency_calls_raise_llm_error_on_failure(call: str) -> None:
+    server = FakeOllama()
+    server.status = 500
+    llm, _ = make_llm(server)
+    args = (USER,) if call == "prefill" else ()
+    with pytest.raises(LLMError, match="HTTP 500"):
+        await getattr(llm, call)(*args)
+
+
+async def test_residency_calls_raise_llm_error_when_unreachable() -> None:
+    def refuse(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused", request=request)
+
+    llm, _ = make_llm(refuse)
+    with pytest.raises(LLMError, match="failed"):
+        await llm.load()  # type: ignore[attr-defined]

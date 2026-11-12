@@ -16,6 +16,7 @@ from lucy.core.events import (
     Event,
     Interrupt,
     PlaybackInterrupted,
+    SpeechActivity,
     TextDelta,
     TurnEnded,
     UserMessage,
@@ -537,3 +538,34 @@ async def test_stt_is_prepared_when_speech_starts() -> None:
     async with Harness(audio, [reply("Hi.")], ["hello"]) as h:
         await h.run()
     assert h.stt.prepared == 1
+
+
+# --- Speech activity --------------------------------------------------------------------
+
+
+async def test_speech_activity_follows_the_listener_and_is_not_stored() -> None:
+    audio = [concat(silence(0.3), tone(1.0), silence(2.0), tone(0.2), silence(2.0))]
+    async with Harness(audio, [reply("Hi.")], ["hello"]) as h:
+        seen = h.bus.subscribe(SpeechActivity, UserMessage)
+        await h.run()
+    states = [e.state if isinstance(e, SpeechActivity) else "USER" for e in drain(seen)]
+    # The short sound after the turn starts speech, then is discarded.
+    assert states == [
+        "idle",
+        "speaking",
+        "transcribing",
+        "USER",
+        "idle",
+        "speaking",
+        "idle",
+        "ended",
+    ]
+    assert not [e for e in h.memory.episodes if e.type == "speech_activity"]
+
+
+async def test_speech_activity_returns_to_idle_after_an_empty_transcript() -> None:
+    audio = [concat(silence(0.3), tone(1.0), silence(2.0))]
+    async with Harness(audio, [], [""]) as h:
+        seen = h.bus.subscribe(SpeechActivity)
+        await h.run()
+    assert [e.state for e in drain(seen)] == ["idle", "speaking", "transcribing", "idle", "ended"]

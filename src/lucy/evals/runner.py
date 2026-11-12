@@ -21,6 +21,7 @@ from lucy.core.config import AdapterConfig, Settings, ToolsSettings
 from lucy.core.events import TextDelta, TurnEnded, UserMessage
 from lucy.core.jobs import JobStatus
 from lucy.core.registry import Registry
+from lucy.core.types import Role
 from lucy.evals.matching import Match, has_keyword
 from lucy.evals.scenario import (
     START,
@@ -484,7 +485,9 @@ class ScenarioRunner:
         trace = await memory.get_trace(turn_ids[-1])
         if trace is None or not trace.steps or not trace.steps[0].messages:
             return None
-        system = trace.steps[0].messages[0].content
+        # The memories are in the first system message or, with the "stable_prefix"
+        # layout, in the one after the user's message.
+        system = "\n\n".join(m.content for m in trace.steps[0].messages if m.role is Role.SYSTEM)
         marker = "## Things you remember"
         if marker not in system:
             return "none"
