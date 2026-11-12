@@ -1,0 +1,97 @@
+# Journal
+
+Dated notes on what was built, what failed and what changed. Newest first.
+
+## 2026-11-12: text brain runs end to end
+
+- A third Opus sub-agent wired the pieces into `src/lucy/app.py` and a `lucy chat` CLI. Turn traces are stored in SQLite (migration 2). Registering the same adapter class twice is now a no-op. 243 tests pass.
+- Verified against the real Ollama: a fact stated in one process was recalled by a new process on the same database and session, because the orchestrator rebuilds the conversation from the episode log.
+- Failure handling verified: a missing model and an unreachable server each print one readable error line per turn and the chat continues.
+- Ctrl-C interrupts a streaming reply and stores the partial text as interrupted; at the prompt it exits. Verified with real signals and a pseudo-terminal, not yet by a person at a terminal.
+- Measured with `gemma4:12b-mlx`: the model thinks by default, giving about 4 to 5 seconds to first token. With `extra = { reasoning_effort = "none" }` on the chat role, first token arrived in 0.2 to 0.3 seconds. The example config leaves thinking on; whether to turn it off is undecided.
+- Observed model behaviour: no markdown in replies; with thinking off it once claimed to have "noted" a fact although no memory graph exists yet; one factual error in an explanation.
+- Decided: thinking is off by default for all LLM roles (`reasoning_effort = "none"`).
+- Planned after the memory phase: automatic reasoning for hard questions. Proposed design: a second role, `chat_deep`, pointing at the same model with thinking on, and an `escalate` tool the fast chat model calls when a question needs careful reasoning; the orchestrator then reruns the step on `chat_deep`. To be measured with a set of easy and hard questions; a small-model classifier is the fallback if the chat model escalates unreliably.
+- Memory phase started: structured output on the LLM port, pre-emption of background calls, an embedder adapter, and a SQLite-backed job queue are being built by two parallel sub-agents.
+- Job queue built (`core/jobs.py`, `memory/sqlite_jobs.py`, migration 3): retries with exponential backoff, deferral that does not count as an attempt, recovery of jobs left running by a crash. Assumptions: one Lucy process per database file, and handlers must be safe to run twice.
+- Model contracts built:
+  - `LLM.stream` takes an optional `response_schema`; `LLMGateway.generate(role, messages, model_type)` returns a validated pydantic object, retrying once on invalid output. Without the capability it falls back to putting the schema in the prompt.
+  - A foreground stream now pre-empts running background streams, which receive `Preempted`. Measured live: a background stream was pre-empted after 5 chunks and the foreground reply took 0.18 s.
+  - `Embedder.embed` takes `kind="document" | "query"`. New adapter `adapters/embed_openai_compat.py`.
+- Probe findings (Ollama 0.40.16, MLX builds):
+  - Schema-constrained output is enforced on both `gemma4:12b-mlx` and `qwen3.5:2b-mlx`: 24 of 24 outputs valid against a nested pydantic schema. Values can still be nonsense (qwen produced the date `5941-59-59` to satisfy a pattern).
+  - With a schema, gemma can emit whitespace indefinitely when the prompt conflicts with the schema. The adapter ends the response after 256 consecutive whitespace characters so a job cannot hang the background lane.
+  - Without constrained decoding, `qwen3.5:2b-mlx` could not follow a nested schema from the prompt alone.
+  - Embedding model: `embeddinggemma` (593 MB on disk, 768 dimensions). With its model-card prefixes it found the right statement for 21 of 22 test queries (19 of 22 without prefixes). An `embeddinggemma-2` model that was already installed scored 19 of 22 on the same test.
+  - Decided by the user: use `embeddinggemma-2`. Its best configuration on the same test is the prefixes `"query: "` / `"passage: "` (20 of 22; 19 of 22 with none). It returns 768-dimension vectors, although `ollama show` reports an embedding length of 512. `embeddinggemma` remains installed but unused.
+- Graph store and retrieval built (`memory/graph_store.py`, `retrieval.py`, `vector_index.py`, `fts.py`, migration 4). `sqlite-vec` 0.1.9 loads correctly with the uv-managed Python, so no fallback was needed. 466 tests pass.
+  - Retrieval fuses three ranked lists (vector, full-text, one-hop entity expansion) with reciprocal rank fusion, then weights by confidence and recency. Uncertain inferences are marked as such in the text given to the chat model.
+  - Added during implementation: a minimum vector similarity (default 0.3, to be tuned), so unrelated statements do not fill the budget; the user entity is not expanded, since nearly everything is about the user.
+  - "Stated beats inferred" is applied per subject and predicate, not per subject as `memory.md` first said.
+  - Design gaps found: statements have no links to other statements, so reflection must cite the supporting episodes; forgetting does not clean job payloads; entity vectors for pre-existing rows appear only after a re-embed job runs.
+- Postgres later: possible. The core depends only on interfaces; a `GraphStore` interface and shared store tests are planned so a second implementation has a contract to meet.
+- Extraction and reconciliation, and maintenance (decay, profile, entity summaries, duplicate merging), are being built by two parallel sub-agents, each with a live evaluation against both local models.
+- Maintenance built (`memory/decay.py`, `profile.py`, `maintenance.py`, migration 5 adding `memory_meta`). 619 tests pass.
+  - Decay stores a per-statement record so the result is the same however often it runs, including after reinforcement between runs.
+  - Live comparison on an invented user (about 40 statements): `gemma4:12b-mlx` wrote an accurate profile in 15 s with nothing invented or missing; `qwen3.5:2b-mlx` took 2.6 s but invented a reason, dropped all goals and once blended two people. Under a loose merge threshold qwen merged other people into the user entity; gemma made no wrong merges.
+  - Decided by the user: `gemma4:12b-mlx` for the summary role and for duplicate-merge checks.
+  - Duplicate candidates are found by name-to-name similarity (threshold 0.9 for `embeddinggemma-2`), because name-plus-summary vectors do not separate duplicates from unrelated entities (all pairs scored 0.70 to 0.81).
+  - The invention check on profiles catches only invented names and numbers; it caught none of the small model's actual errors.
+  - Not built: predicate merging. Summaries and merging process one bounded batch per interval, so a large backlog drains slowly.
+- Extraction and reconciliation built (`memory/extraction.py`, `reconcile.py`, `resolution.py`, `policy.py`). 619 tests pass with maintenance included.
+  - Live evaluation, 28 scripted user turns with 25 expected items and 11 turns that should produce nothing: `gemma4:12b-mlx` found 24 to 25 with no wrong kinds, origins or dates, and kept all 11 empty; `qwen3.5:2b-mlx` found 17 to 20, missed a contradiction, never produced a decision's options, and at default temperature attributed another person's move to the user. Gemma averaged 2.2 s per turn.
+  - Decision: the extraction role uses `gemma4:12b-mlx` with `temperature = 0` and `max_tokens = 2048` (a run without a token cap hung for over 150 s). All three roles now use the same model, so only one is loaded.
+  - Statements are extracted only from what the user said; Lucy's replies and tool results are context.
+  - Measured with `embeddinggemma-2`: same-meaning statements score 0.83 to 0.98, unrelated ones 0.66 to 0.83, and contradictions 0.85 to 0.96, so similarity finds candidates and the model decides. Policy defaults are set from these numbers and are specific to this embedder.
+  - Guard rails in code override the model: an inference never supersedes a stated statement, statements from the same turn are not reconciled against each other, and a near-identical "add" becomes a reinforcement.
+  - Known limits: a re-run after a crash can create a near-duplicate if the model words its output differently; statements written before the user's name is known keep saying "The user".
+- Reflection built (`memory/reflection.py`, job kind `memory.reflect`, scheduled after merging and before summaries and the profile). 755 tests pass.
+  - Live evaluation on a six-week invented log (80 messages, then 22 more): no false inferences in any run and every decoy ignored. Found 3 of 5 planted patterns (gym on Mon/Wed/Fri mornings, Sunday call, short answers). The two misses were already stored by extraction as stated preferences after a single mention.
+  - Goal and decision follow-up: an achieved goal was closed at the date of the message that reported it, with an outcome fact; a decision's outcome was recorded; an open goal stayed open.
+  - Confidence over time: an inferred habit starts at 0.40, reached 0.54 after one reinforcing run, and a habit that stopped fell to 0.20 after three months of decay against 0.30 for one that continued.
+  - Changes forced by the real model: messages are shown grouped by weekday (in plain time order the model never found the Sunday habit); the goal review and the re-check of known inferences use one required answer field per item (with a free list the model skipped items).
+  - Cost per run: about 10 to 14 s for pattern inference on a 5,000 to 6,000 token prompt.
+  - Problems found, to fix next: extraction stores a single choice as a stated preference and stores plans as goals; extraction closed a dropped goal with the extraction date instead of the message date; the reconciler adds a duplicate when new evidence includes all of a statement's existing sources (reflection works around it); decay separates stopped from continuing habits slowly at a 90-day half-life; an inference needs two reinforcing runs to reach the profile's 0.6 threshold.
+- Memory wired into the app (`app.py`, `clients/memory_cli.py`, `memory/ports.py` with a 50-member `GraphStore` protocol checked against the SQLite store by signature). 756 tests pass.
+  - `lucy memory` commands: status, profile, search, about, why, correct, forget, work, rebuild.
+  - Live end-to-end, all roles on `gemma4:12b-mlx`: facts stated in one session were recalled in a different session; an instruction to answer in two sentences was followed; "moved from Lisbon to Porto" closed "lives in Lisbon" with an end date; after `forget`, the text was absent from every table; after `correct`, the corrected value was used.
+  - Latency: building context including retrieval took 0.02 to 0.11 s; first token 0.4 to 1.0 s. A chat turn pre-empted a running background job every time, costing roughly 0.1 to 0.3 s.
+  - Two concurrency bugs found and fixed: the job store was not safe when used from several tasks, and a cancelled graph-store write could leave a transaction open and hold the database lock.
+  - Problems found, being fixed: the reflect job had no handler registered and failed each time; the profile was only rewritten daily and went stale; a correction is not in the episode log, so a rebuild loses it; retrieval's similarity floor of 0.3 filters nothing with `embeddinggemma-2` (unrelated statements score 0.63 to 0.72) and ranking is weak; a pet was only half-extracted; the chat model once added an invented detail to a remembered fact.
+  - Operating rule: do not run `lucy memory work`, `correct`, `forget` or `rebuild` while `lucy chat` is using the same database.
+- Learning-quality fixes (extraction, reconciler, reflection), each with unit tests and a before/after run on the real model:
+  - Extraction evaluation: original set 25 of 25 found with 2 to 3 spurious (4 before); new cases 21 of 21 with 3 spurious and 13 of 13 empty turns kept (20 of 21, 12 spurious, 10 of 13 before).
+  - Single choices and plans produce nothing; new entities are linked to the user; a change of state stores the new state; giving something up closes the goal and related habits at the message date; "The user" is replaced by the name once known.
+  - The reconciler no longer adds a duplicate when new evidence includes all existing sources; reflection's workaround is removed. Reflection now finds 4 of 5 planted patterns with no false inferences.
+- Phase completion:
+  - Reflection wired into the app; jobs that had failed for lack of a handler are requeued once at start.
+  - Profile rewritten after the extraction backlog drains (60 s quiet period), not only daily.
+  - Corrections are written to the episode log and survive a rebuild (verified with the real model).
+  - Retrieval tuned for `embeddinggemma-2`: recall at 5 from 0.71 to 0.86, mean reciprocal rank from 0.71 to 0.93, irrelevant statements per personal query from 39 to 2.2. The largest single fix was the entity-expansion floor, which had been pulling in unrelated people on every query.
+  - Decay defaults changed to a 30-day grace period and 30-day half-life.
+  - Persona gained two sentences against embellishing remembered facts: embellished answers went from 4 of 10 to 0 of 10 in a live probe.
+  - `lucy eval` built with 17 scenarios. Final run: 16 of 17 (the failure is a Sunday-call habit stored as stated, so not inferred). Run-to-run variance is real: two scenarios that failed in the agent's run passed in the verification run.
+- Both final agents were cut off once by a network error and resumed with their context intact.
+- 847 tests pass; three consecutive full runs were clean.
+- Not done: `reflection.py` still annotates the concrete SQLite store instead of the `GraphStore` protocol; a measured-better query prefix for the embedder was not adopted because the thresholds are tied to the current one; the profile writer once assumed the user's gender; the chat model sometimes claims to have "added that to your profile".
+- Known limits: no line editing at the CLI prompt; if building the LLM adapters fails partway, already-created ones are not closed; the CLI hides the orchestrator's traceback for failed turns by matching its log message text.
+
+## 2026-11-11: restart and core design
+
+- Restarted the project. The original repo held 216 lines of standalone scripts (weather, wiki, jokes, Bluetooth, TTS); none of it is reused as a base.
+- Target machine: Apple M5 Pro, 24 GB RAM. Ollama, Homebrew, Docker and Node are installed; `uv` and `ffmpeg` are not; system Python is 3.9.
+- Agreed the overall architecture and the core design, including model roles, capability declarations and adapter-boundary normalisation. Recorded as ADRs 0001 to 0009 and summarised in `architecture.md`.
+- Agreed the memory design: three layers (episodes, knowledge graph, core profile), typed temporal statements with stated/inferred origin, and a five-step learning loop. Written up in `memory.md` with ADRs 0010 to 0012.
+- Open: confidence values and thresholds, extraction context size, and document ingestion (listed at the end of `memory.md`); to be settled during implementation against the eval set.
+- Built the code skeleton (written by an Opus sub-agent from a brief, then reviewed): `uv` 0.13.7 with Python 3.12, old scripts moved to `legacy/`, and the core contracts in `src/lucy/core/` (types, events, ports, registry, bus, config). 60 tests pass, including one that fails if `core/` imports from adapters, server, clients, memory or tools.
+- Applied three contract fixes: `schema_version` on events, an `AssistantMessage` event per LLM step, and `Tool.run` returning `ToolOutput`. ADRs 0003 and 0006 amended.
+- Built the text brain with two parallel Opus sub-agents:
+  - Core: orchestrator, context builder, LLM gateway, history rebuild from the log, sentence splitter, turn traces, persona prompt.
+  - Adapters: SQLite episode log with numbered migrations, and an OpenAI-compatible LLM adapter (registered as `openai_compat` and `ollama`).
+- Probed the installed Ollama (0.40.16). Findings:
+  - Thinking arrives in a separate `delta.reasoning` field, never as `<think>` tags. `"reasoning_effort": "none"` (via the adapter's `extra` option) turns it off; `"think": false` is ignored on the OpenAI-compatible endpoint.
+  - Tool calls arrive complete in one delta. All installed chat models produced valid calls.
+  - `gemma4:12b-mlx` (7.2 GiB loaded) gave the best answers from tool results and is the chat model. `qwen3.5:2b-mlx` (2.9 GiB) is used for extraction and summary. `qwen3.5:0.8b-mlx` gave wrong answers and ran away thinking; `gemma4:e4b-mlx` uses more memory than the 12b.
+  - Native context lengths are 131k to 262k; Lucy caps her own prompt budget at 32768 tokens for latency.
+- Known limits carried forward: a running background LLM call is not pre-empted by a foreground one yet; the context budget is computed once per turn and does not count messages added during the tool loop; tools marked dangerous are refused until the confirmation flow exists; the adapter reports no structured-output capability because the `LLM` port cannot request it yet.
+- Still open from the skeleton review: the registry's one-adapter-per-port shape does not fit tools (to solve in the tools phase), and the `LLM` port has no load/unload hooks for the gateway (to solve when two models run side by side in the memory phase).
