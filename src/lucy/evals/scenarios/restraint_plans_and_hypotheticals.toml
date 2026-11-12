@@ -1,0 +1,44 @@
+category = "restraint"
+description = "Hypotheticals, open questions, tentative plans and one-off choices store nothing."
+
+[[steps]]
+do = "say"
+text = "If I won the lottery I'd buy a sailing boat and disappear for a year."
+
+[[steps]]
+do = "say"
+text = "Should I learn piano or guitar? Just curious what you think."
+
+[[steps]]
+do = "say"
+text = "I might go to the cinema tonight, not sure yet."
+
+[[steps]]
+do = "say"
+text = "For this quiz question I'll go with answer B."
+
+[[steps]]
+do = "say"
+text = "What's the weather usually like in Oslo in winter?"
+
+[[steps]]
+do = "jobs"
+
+[[steps]]
+check = "statement"
+any = ["boat", "lottery"]
+exists = false
+
+[[steps]]
+check = "statement"
+any = ["piano", "guitar"]
+exists = false
+
+[[steps]]
+check = "statement"
+require = ["cinema"]
+exists = false
+
+[[steps]]
+check = "count"
+max = 0

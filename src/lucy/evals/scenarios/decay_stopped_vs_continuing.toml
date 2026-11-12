@@ -1,0 +1,188 @@
+category = "decay"
+description = "Over 16 simulated weeks: a weekly swim that continues keeps its confidence; a weekly choir that stops after six weeks decays."
+
+# History is logged without extraction (extract = false): only reflection and decay
+# are under test, and it keeps the run short. Maintenance (decay, reflection, the
+# profile) runs at the end of every second week of simulated time.
+
+[[steps]]
+do = "history"
+extract = false
+messages = [
+  { day = 0, time = "13:00", text = "What's a good stretch for tight shoulders?" },
+  { day = 1, time = "13:00", text = "How do I descale a kettle?" },
+  { day = 2, time = "21:00", text = "Choir practice tonight, we're learning a new hymn." },
+  { day = 3, time = "13:00", text = "Recommend a podcast about space." },
+  { day = 4, time = "13:00", text = "What's the capital of Mongolia?" },
+  { day = 5, time = "08:30", text = "Swim at the lido this morning, 40 lengths." },
+  { day = 6, time = "13:00", text = "How long do boiled eggs keep in the fridge?" },
+  { day = 8, time = "13:00", text = "Explain compound interest simply." },
+  { day = 9, time = "21:00", text = "Wednesday choir rehearsal, my voice is tired." },
+  { day = 12, time = "08:30", text = "Saturday swim done, the pool was freezing." },
+]
+
+[[steps]]
+do = "maintenance"
+advance_days = 1.5625
+
+[[steps]]
+do = "history"
+extract = false
+messages = [
+  { day = 14, time = "13:00", text = "What's a good houseplant for low light?" },
+  { day = 15, time = "13:00", text = "How many grams in an ounce?" },
+  { day = 16, time = "21:00", text = "Back from choir, the altos were great tonight." },
+  { day = 17, time = "13:00", text = "Suggest a name for a goldfish." },
+  { day = 18, time = "13:00", text = "What's the time difference between London and Tokyo?" },
+  { day = 19, time = "08:30", text = "Early Saturday swim again, felt strong." },
+  { day = 20, time = "13:00", text = "How do I fold a fitted sheet?" },
+  { day = 22, time = "13:00", text = "Recommend a classic novel." },
+  { day = 23, time = "21:00", text = "Choir again this evening, lovely harmonies." },
+  { day = 26, time = "08:30", text = "Did my usual Saturday morning swim." },
+]
+
+[[steps]]
+do = "maintenance"
+advance_days = 1.5625
+
+[[steps]]
+do = "history"
+extract = false
+messages = [
+  { day = 28, time = "13:00", text = "What's the best way to clean a cast iron pan?" },
+  { day = 29, time = "13:00", text = "How do I say thank you in Japanese?" },
+  { day = 30, time = "21:00", text = "Wednesday choir, we sang Faure." },
+  { day = 31, time = "13:00", text = "What's a good warm-up before a walk?" },
+  { day = 32, time = "13:00", text = "Why is the sky blue?" },
+  { day = 33, time = "08:30", text = "Back from swimming, Saturday lengths done." },
+  { day = 34, time = "13:00", text = "How do I make cold brew coffee?" },
+  { day = 36, time = "13:00", text = "What's a quick vegetarian dinner idea?" },
+  { day = 37, time = "21:00", text = "Choir rehearsal tonight, concert prep." },
+  { day = 40, time = "08:30", text = "Saturday swim, 2 km today." },
+]
+
+[[steps]]
+do = "maintenance"
+advance_days = 1.5625
+
+[[steps]]
+do = "history"
+extract = false
+messages = [
+  { day = 42, time = "13:00", text = "How do I remove a splinter?" },
+  { day = 43, time = "13:00", text = "What's the boiling point of water in Fahrenheit?" },
+  { day = 45, time = "13:00", text = "Recommend a documentary about oceans." },
+  { day = 46, time = "13:00", text = "How do I sharpen a kitchen knife?" },
+  { day = 47, time = "08:30", text = "Pool first thing this Saturday, as usual." },
+  { day = 48, time = "13:00", text = "Tell me a good riddle." },
+  { day = 50, time = "13:00", text = "How many legs does a spider have?" },
+  { day = 52, time = "13:00", text = "What's the difference between weather and climate?" },
+  { day = 53, time = "13:00", text = "How do I stop my glasses fogging up?" },
+  { day = 54, time = "08:30", text = "Another Saturday swim in the books." },
+]
+
+[[steps]]
+do = "maintenance"
+advance_days = 1.5625
+
+[[steps]]
+do = "history"
+extract = false
+messages = [
+  { day = 56, time = "13:00", text = "Suggest a weekend breakfast." },
+  { day = 57, time = "13:00", text = "What's a haiku?" },
+  { day = 59, time = "13:00", text = "How does a rainbow form?" },
+  { day = 60, time = "13:00", text = "What's a good card game for two?" },
+  { day = 61, time = "08:30", text = "Swam this morning before the crowds." },
+  { day = 62, time = "13:00", text = "How do I keep cut flowers fresh?" },
+  { day = 64, time = "13:00", text = "What's the tallest mountain in Africa?" },
+  { day = 66, time = "13:00", text = "Explain what a VPN does." },
+  { day = 67, time = "13:00", text = "How do I get rid of fruit flies?" },
+  { day = 68, time = "08:30", text = "Saturday lengths at the lido, lovely." },
+]
+
+[[steps]]
+do = "maintenance"
+advance_days = 1.5625
+
+[[steps]]
+do = "history"
+extract = false
+messages = [
+  { day = 70, time = "13:00", text = "What's a polite way to decline an invitation?" },
+  { day = 71, time = "13:00", text = "Recommend a jazz album." },
+  { day = 73, time = "13:00", text = "What's the healthiest way to cook broccoli?" },
+  { day = 74, time = "13:00", text = "How do I calm down before a presentation?" },
+  { day = 75, time = "08:30", text = "Usual Saturday swim, the water was warm." },
+  { day = 76, time = "13:00", text = "What does 'ad hoc' mean?" },
+  { day = 78, time = "13:00", text = "How do I tie a bowline knot?" },
+  { day = 80, time = "13:00", text = "What's a good stretch after cycling?" },
+  { day = 81, time = "13:00", text = "Why do cats purr?" },
+  { day = 82, time = "08:30", text = "Swim this morning, new personal best." },
+]
+
+[[steps]]
+do = "maintenance"
+advance_days = 1.5625
+
+[[steps]]
+do = "history"
+extract = false
+messages = [
+  { day = 84, time = "13:00", text = "How do I measure a room for paint?" },
+  { day = 85, time = "13:00", text = "Write me a two-line poem about rain." },
+  { day = 87, time = "13:00", text = "How do I clean suede shoes?" },
+  { day = 88, time = "13:00", text = "Recommend a strategy board game." },
+  { day = 89, time = "08:30", text = "Saturday swim session, felt slow today." },
+  { day = 90, time = "13:00", text = "What's the speed of sound?" },
+  { day = 92, time = "13:00", text = "How do I make a paper plane?" },
+  { day = 94, time = "13:00", text = "What's the largest desert in the world?" },
+  { day = 95, time = "13:00", text = "How do I iron a shirt quickly?" },
+  { day = 96, time = "08:30", text = "Lido swim this morning, sunny." },
+]
+
+[[steps]]
+do = "maintenance"
+advance_days = 1.5625
+
+[[steps]]
+do = "history"
+extract = false
+messages = [
+  { day = 98, time = "13:00", text = "What's a good name for a houseplant?" },
+  { day = 99, time = "13:00", text = "How long should I steep green tea?" },
+  { day = 101, time = "13:00", text = "What's the difference between a crocodile and an alligator?" },
+  { day = 102, time = "13:00", text = "How do I back up my phone photos?" },
+  { day = 103, time = "08:30", text = "Did my Saturday swim, 45 lengths." },
+  { day = 104, time = "13:00", text = "What rhymes with orange?" },
+  { day = 106, time = "13:00", text = "Explain photosynthesis in one sentence." },
+  { day = 108, time = "13:00", text = "How far is the moon?" },
+  { day = 109, time = "13:00", text = "What's a good stretch for my wrists?" },
+  { day = 110, time = "08:30", text = "Morning swim, my Saturday routine." },
+]
+
+[[steps]]
+do = "maintenance"
+advance_days = 1.5625
+
+[[steps]]
+check = "statement"
+any = ["swim", "swims", "swimming"]
+kind = "habit"
+origin = "inferred"
+min_confidence = 0.6
+
+[[steps]]
+check = "statement"
+require = ["choir"]
+kind = "habit"
+origin = "inferred"
+max_confidence = 0.59
+
+# Ten weeks without choir: well past uncertain (0.20 expected with the defaults).
+[[steps]]
+check = "statement"
+require = ["choir"]
+kind = "habit"
+origin = "inferred"
+max_confidence = 0.3

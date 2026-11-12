@@ -1,0 +1,37 @@
+category = "forgetting"
+description = "Forgotten health information stays gone after a rebuild."
+
+[[steps]]
+do = "say"
+text = "I've been taking sertraline for my anxiety since January."
+
+[[steps]]
+do = "say"
+text = "I'm training for a 10k run in June."
+
+[[steps]]
+do = "jobs"
+
+[[steps]]
+do = "forget"
+find = { require = ["sertraline"] }
+
+[[steps]]
+check = "absent"
+words = ["sertraline"]
+
+[[steps]]
+check = "statement"
+require = ["10k"]
+
+[[steps]]
+do = "rebuild"
+
+[[steps]]
+check = "absent"
+words = ["sertraline"]
+
+[[steps]]
+check = "answer"
+question = "What medication am I taking?"
+forbid = ["sertraline"]

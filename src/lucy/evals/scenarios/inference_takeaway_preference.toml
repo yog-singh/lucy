@@ -1,0 +1,35 @@
+category = "inference"
+description = "Choosing Thai takeaway week after week becomes an inferred preference or habit."
+
+[[steps]]
+do = "history"
+messages = [
+  { day = 0, time = "10:00", text = "What's a good stretch for a stiff lower back?" },
+  { day = 2, time = "19:30", text = "Ordered from the Thai place again tonight, green curry." },
+  { day = 4, time = "09:00", text = "How many tablespoons are in a quarter cup?" },
+  { day = 6, time = "11:00", text = "Is it going to be a good weekend for a walk, generally, in April?" },
+  { day = 9, time = "19:45", text = "Thai takeaway again, pad see ew this time." },
+  { day = 11, time = "08:30", text = "Can you explain what a Roth IRA is?" },
+  { day = 16, time = "20:00", text = "Friday treat: Thai food again, massaman curry." },
+  { day = 18, time = "14:00", text = "What's the difference between baking soda and baking powder?" },
+  { day = 20, time = "10:30", text = "Recommend a board game for four adults." },
+  { day = 23, time = "19:30", text = "Got Thai again, the usual place." },
+  { day = 24, time = "12:00", text = "How do I get coffee stains out of a white shirt?" },
+  { day = 25, time = "21:00", text = "Thanks for the tips!" },
+]
+
+[[steps]]
+do = "maintenance"
+advance_days = 1
+
+[[steps]]
+check = "statement"
+require = ["Thai"]
+kind = ["preference", "habit"]
+origin = "inferred"
+min_sources = 2
+
+[[steps]]
+check = "answer"
+question = "I'm ordering a takeaway tonight, what would I probably go for?"
+require = ["Thai"]

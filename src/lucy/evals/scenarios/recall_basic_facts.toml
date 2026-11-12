@@ -1,0 +1,37 @@
+category = "recall"
+description = "Facts told in one session are recalled in a new one."
+
+[[steps]]
+do = "say"
+text = "Hi! I'm Priya Raman. I work as a pharmacist at a hospital in Leeds."
+
+[[steps]]
+do = "say"
+text = "I also have a cat called Miso, she's a grumpy tabby."
+
+[[steps]]
+do = "jobs"
+
+[[steps]]
+check = "statement"
+require = ["Miso"]
+origin = "stated"
+
+[[steps]]
+check = "statement"
+require = ["pharmacist"]
+
+[[steps]]
+check = "profile"
+require = ["Priya"]
+any = ["pharmacist"]
+
+[[steps]]
+check = "answer"
+question = "What's my cat called?"
+require = ["Miso"]
+
+[[steps]]
+check = "answer"
+question = "What do I do for a living?"
+any = ["pharmacist", "pharmacy"]

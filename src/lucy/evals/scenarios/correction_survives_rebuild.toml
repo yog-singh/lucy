@@ -1,0 +1,49 @@
+category = "correction"
+description = "A correction made with `lucy memory correct` survives a rebuild from the log."
+
+[[steps]]
+do = "say"
+text = "Hi, I'm Ola. I live in Galway, right by the river."
+
+[[steps]]
+do = "jobs"
+
+[[steps]]
+do = "correct"
+find = { require = ["Galway"] }
+text = "Ola lives in Cork"
+
+[[steps]]
+check = "statement"
+require = ["Cork"]
+origin = "stated"
+
+[[steps]]
+check = "statement"
+require = ["Galway"]
+forbid = ["Cork"]
+exists = false
+
+[[steps]]
+do = "rebuild"
+
+[[steps]]
+check = "statement"
+require = ["Cork"]
+origin = "stated"
+
+[[steps]]
+check = "statement"
+require = ["Galway"]
+forbid = ["Cork"]
+exists = false
+
+[[steps]]
+check = "superseded"
+require = ["Galway"]
+replaced_by = { require = ["Cork"] }
+
+[[steps]]
+check = "answer"
+question = "Which city do I live in?"
+require = ["Cork"]

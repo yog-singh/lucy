@@ -1,0 +1,35 @@
+category = "inference"
+description = "Gym visits on Monday and Thursday mornings over three weeks become an inferred habit."
+
+[[steps]]
+do = "history"
+messages = [
+  { day = 0, time = "07:40", text = "Back from the gym, leg day was brutal." },
+  { day = 1, time = "19:00", text = "What's a good podcast about medieval history?" },
+  { day = 3, time = "07:35", text = "Just got back from my morning gym session." },
+  { day = 5, time = "12:00", text = "How long should I boil an egg for a runny yolk?" },
+  { day = 7, time = "07:45", text = "Gym done before work again, now coffee." },
+  { day = 9, time = "20:00", text = "Can you recommend a good science fiction film?" },
+  { day = 10, time = "07:30", text = "Morning workout at the gym, feeling great." },
+  { day = 12, time = "13:00", text = "What's the weather usually like in Krakow in May?" },
+  { day = 14, time = "07:40", text = "Back from the gym, what's a quick breakfast idea?" },
+  { day = 15, time = "18:30", text = "How do I convert cups of flour to grams?" },
+  { day = 17, time = "07:50", text = "The gym was packed this morning." },
+  { day = 18, time = "21:00", text = "Thanks, that's helpful." },
+]
+
+[[steps]]
+do = "maintenance"
+advance_days = 1
+
+[[steps]]
+check = "statement"
+any = ["gym", "workout", "exercise", "exercises", "works out"]
+kind = "habit"
+origin = "inferred"
+min_sources = 3
+
+[[steps]]
+check = "answer"
+question = "What do I usually do early on Monday and Thursday mornings?"
+any = ["gym", "workout", "work out", "exercise"]

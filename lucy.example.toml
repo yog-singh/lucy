@@ -1,0 +1,80 @@
+# Example Lucy settings. Copy to lucy.toml and adjust.
+# In each section, `adapter` picks the registered adapter; every other key is
+# passed to that adapter's constructor.
+
+[llm.roles]
+# `context_window` is Lucy's own prompt budget (kept small for latency); it is
+# not sent to the server. `extra` is merged into every request: thinking is off
+# (`reasoning_effort = "none"`), which cuts time to first token from seconds
+# to a fraction of a second.
+# All three roles use the same model, so only one is loaded. Extraction with
+# gemma4:12b-mlx found 24 to 25 of 25 expected items in the live evaluation
+# (17 to 20 with qwen3.5:2b-mlx); it runs at temperature 0, and `max_tokens`
+# caps a runaway structured response (one uncapped run hung for over 150 s).
+# The summary role writes the profile and entity summaries and checks
+# duplicate-entity merges.
+chat       = { adapter = "ollama", model = "gemma4:12b-mlx", context_window = 32768, extra = { reasoning_effort = "none" } }
+extraction = { adapter = "ollama", model = "gemma4:12b-mlx", context_window = 32768, temperature = 0, extra = { reasoning_effort = "none", max_tokens = 2048 } }
+summary    = { adapter = "ollama", model = "gemma4:12b-mlx", context_window = 32768, extra = { reasoning_effort = "none", max_tokens = 1024 } }
+
+[stt]
+adapter = "mlx_whisper"
+model   = "large-v3-turbo"
+
+[tts]
+adapter = "kokoro"
+voice   = "af_heart"
+
+[embedder]
+# Ollama adds no prefixes (the model template is the bare prompt), so the
+# adapter prepends them by kind. For embeddinggemma-2, "query: " / "passage: "
+# retrieved best on Lucy's personal-fact test set (20/22 top-1, MRR 0.955 vs
+# 19/22, 0.932 unprefixed and 19/22, 0.924 with EmbeddingGemma's task prefixes).
+# Ollama reports embedding_length 512, but the API returns 768-dim vectors.
+adapter         = "ollama"
+model           = "embeddinggemma-2"
+dimensions      = 768
+query_prefix    = "query: "
+document_prefix = "passage: "
+
+[memory]
+adapter = "sqlite"
+path    = "data/lucy.db"
+
+[learning]
+# Optional; these are the defaults. Lucy learns from conversation in the
+# background when an [embedder] is configured and memory is "sqlite".
+# `enabled = false` keeps chat working with conversation replay only.
+enabled                    = true
+# How often decay, entity summaries, duplicate merging and the profile rewrite
+# run (checked at startup and hourly while Lucy runs).
+maintenance_interval_hours = 24
+# Turns one extraction job processes before handing over to a follow-up job.
+extract_max_turns          = 4
+# How long an inferred statement (a habit or preference Lucy worked out) keeps
+# its confidence after it was last observed, and how fast it fades after that
+# (halving every `decay_half_life_days`). With 30 / 30, a weekly habit that stops
+# becomes uncertain (below 0.6) about seven weeks after it was last seen and
+# negligible after about four months; a monthly habit that continues is not
+# punished. Stated statements never decay.
+decay_grace_days           = 30
+decay_half_life_days       = 30
+
+[retrieval]
+# Optional; these are the defaults. Which statements a turn gets. The similarity
+# values are cosine similarities measured for embeddinggemma-2 with the
+# "query: " / "passage: " prefixes above (its scores sit in a narrow band:
+# unrelated statements 0.53 to 0.76, relevant ones 0.61 to 0.85). Measure them
+# again if you change the embedding model or its prefixes.
+# A statement found by meaning must be at least this similar to the message...
+vector_min_similarity  = 0.68
+# ...and at most this far below the best match.
+vector_margin          = 0.06
+# A keyword match must also be at least this similar (a shared common word such
+# as "works" is not relevance). -1 turns the check off.
+keyword_min_similarity = 0.62
+# People, places and things similar to the message (not named in it) bring in
+# their statements only from this similarity up.
+entity_min_similarity  = 0.75
+# At most this many statements per turn.
+max_statements         = 8

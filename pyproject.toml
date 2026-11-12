@@ -1,0 +1,47 @@
+[project]
+name = "lucy"
+version = "0.1.0"
+description = "A fully local personal voice assistant."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "aiosqlite>=0.22.1",
+    "httpx>=0.28.1",
+    "pydantic>=2.7",
+    "sqlite-vec>=0.1.9",
+]
+
+[project.scripts]
+lucy = "lucy.clients.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["uv_build>=0.8,<0.14"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+addopts = "-m 'not live and not slow'"
+markers = [
+    "live: needs a real local model server (Ollama); run with `pytest -m live`",
+    "slow: benchmarks at personal scale; run with `pytest -m slow -s`",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["legacy"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["lucy"]

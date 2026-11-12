@@ -1,0 +1,41 @@
+category = "forgetting"
+description = "A forgotten fact is gone from every table and from answers, also after a rebuild."
+
+[[steps]]
+do = "say"
+text = "My sister Ines works at Halden Bank as a risk analyst."
+
+[[steps]]
+do = "say"
+text = "Also, I have a little terrier called Pip."
+
+[[steps]]
+do = "jobs"
+
+[[steps]]
+do = "forget"
+find = { require = ["Halden"] }
+
+[[steps]]
+check = "absent"
+words = ["Halden"]
+
+[[steps]]
+check = "statement"
+require = ["Pip"]
+
+[[steps]]
+do = "rebuild"
+
+[[steps]]
+check = "absent"
+words = ["Halden"]
+
+[[steps]]
+check = "statement"
+require = ["Pip"]
+
+[[steps]]
+check = "answer"
+question = "Where does my sister work?"
+forbid = ["Halden"]
