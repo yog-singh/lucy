@@ -2,6 +2,83 @@
 
 Dated notes on what was built, what failed and what changed. Newest first.
 
+## 2026-11-12: leftovers, voice design, tools started
+
+- PR 1 opened with the core, text chat and memory system.
+- PR 1 merged into `main` by the user.
+- Leftovers fixed by a sub-agent (898 tests pass with its changes alone):
+  - Memory modules other than the SQLite implementation now import only `memory/ports.py`; a test enforces it. The contract's error types and `DERIVED_META_PREFIX` moved to `ports.py`.
+  - The failing eval scenario was itself wrong (its messages stated the habit outright). Rewritten so the pattern shows only across messages (5 of 5 passes), with a new scenario for an outright-stated habit (3 of 3).
+  - Profile and entity-summary prompts no longer assume gender: "he" or "she" appeared for the user in 6 of 6 profiles before and 0 of 6 after; a code check flags unsupported gendered pronouns and retries.
+  - Persona: Lucy no longer claims to have noted or saved things (16 of 50 replies before, 0 of 50 after).
+  - Line editing at the chat prompt with `prompt_toolkit` (new dependency), used only on an interactive terminal; piped input is unchanged. Verified on a pseudo-terminal: edits, history recall, Ctrl-C mid-reply, clean exit. History is kept in `chat_history` beside the database.
+  - Regression exposed by the persona change: `update_preference_change` failed because extraction wrote "switched to decaf" and nothing was superseded.
+- That regression fixed in the reconciler by a sub-agent, without touching the extraction prompt:
+  - Measured with `embeddinggemma-2`: a change event scores 0.81 to 0.88 against the state it replaces, and unrelated statements about the same person 0.71 to 0.80, so neither rewording alone nor a wider search alone is enough.
+  - A change-event candidate now gets one call that sees statements down to 0.76 and rewrites the change as the new state. It costs about 2 s and triggered on about 1 in 55 turns.
+  - Results: the scenario passed 5 of 5; the other update and restraint scenarios 3 of 3 each; full eval 17 of 18 (the intermittent `recall_after_weeks`); extraction evaluation unchanged at 25/25 and 21/21, with one empty turn lost in one of two runs that was traced to model nondeterminism on an unchanged request.
+  - Still open: when extraction writes the new state itself but below the similarity floor, the old statement stays (two employers current).
+- Voice design approved by the user:
+  - Pipeline: microphone, voice-activity detection, speech-to-text, `UserMessage(source="voice")`, orchestrator, `SentenceReady` events, text-to-speech, playback queue.
+  - Three stages: half-duplex `lucy voice` with a key press to interrupt; barge-in; wake word.
+  - In-process first; the WebSocket server comes when a second client needs it.
+  - An interrupted reply is recorded as what was actually spoken, reported by the voice client, not what was generated.
+  - Latency target: about one second from end of speech to first audio.
+  - Model and library choices wait for a measured survey of speech options on this machine (running).
+- Speech survey finished (no repo changes; scripts, results and audio samples are in the session scratchpad under `voice_spike/`). Written up in `voice.md` and ADRs 0014 to 0016.
+  - Ollama 0.40.16 serves speech: `/v1/audio/speech` (streamed 24 kHz mono 16-bit) and `/v1/audio/transcriptions`.
+  - `phonon` is a text-to-speech model. `phonon:40m-en` (already installed) is CC BY-NC 4.0; `phonon:latest` (Apache-2.0, 112 MB) was pulled and is the one to use. First voiced audio in about 0.05 s, 38 voices.
+  - STT on 12 synthesised utterances in 5 voices plus 2 noisy copies: Parakeet v2 4.3% word error rate at 0.05 s per short clip; Whisper large-v3-turbo 3.1% at 0.18 s but outputs "Thank you." on silence and pulls in PyTorch; `gemma4:12b-mlx` 11.2% and answers silence as chat.
+  - Silero VAD as ONNX costs 64 µs per 32 ms frame; the pip package would add 720 MB of PyTorch.
+  - WebRTC AEC3 in a simulated room stopped echo from triggering the VAD and STT while a barge-in was still transcribed correctly.
+  - Estimated end-of-speech to first audio: about 1.75 s, of which 0.57 s is endpointing and about 1.0 s is the model reaching its first full sentence.
+  - Problem found: Ollama has `gemma4:12b-mlx` loaded with a 262,144-token context using 16.2 GB, although Lucy caps prompts at 32,768. The machine was swapping (14.0 of 14.3 GB swap used), with an 8.2 GB virtual machine also running. The OpenAI-compatible endpoint may not accept a context length per request; to be fixed before voice.
+  - Downloads kept by the survey: about 7.6 GB of candidate models and 5 GB of Python environments in the scratchpad, plus 1.7 GB in uv's wheel cache.
+- Tools decided by the user: internet lookup for grounding through Wikipedia and a self-hosted SearXNG instance. A sub-agent is building the tools foundation (config, `wikipedia`, `web_search`, `fetch_page`), off by default because queries leave the machine.
+- Tools built by a sub-agent (ADR 0013): `wikipedia`, `web_search`, `fetch_page`, the `[tools]` config, the guidance prompt `prompts/tools.md`, and `deploy/searxng/`. 1103 tests pass with all current work.
+  - A SearXNG container (`lucy-searxng`) is running on 127.0.0.1:8890. Stop it with `docker-compose stop` in `deploy/searxng/`.
+  - On 25 varied turns with the real model, tool choice was right on almost all: lookups for specific or current facts, no tool for arithmetic, common knowledge, small talk, or questions about the user. A failed search was reported as a failure, not guessed around.
+  - A page with a planted instruction was never obeyed (6 of 6 runs); after a prompt change Lucy also reports that the page contains such an instruction.
+  - Cost: Wikipedia about 0.55 s per call, SearXNG 1 to 2 s; a turn with one lookup takes about 6 s against 1.4 s without. Fixed prompt cost with tools enabled is about 750 tokens.
+  - Fault found: with `reasoning_effort = "none"` and tools offered (or tool calls in the history), `gemma4:12b-mlx` sometimes repeats an empty thought block until the 120 s timeout, producing no output. Measured directly: 3 to 5 of 8 attempts on one follow-up question with tools offered, 0 of 8 without; 0 of 34 with thinking on. In whole chat runs it hit 2 of about 60 turns. Temperature 0 avoids the loop but the model then answers from memory with invented facts.
+  - To do: bound and recover from the silent stream; shorten earlier turns' tool results in rebuilt history; make `lucy eval` run with tools off; show the lookup argument in the chat marker.
+- Grounding failure reported by the user from a real session: asked who Apple's current CEO is, Lucy called `wikipedia`, received an article stating that Tim Cook served as CEO until 31 August 2026 and was succeeded by John Ternus, and answered "Tim Cook" from her own memory. Asked to recheck, she claimed to have checked without calling a tool, then invented a fact about the successor, then misread stale search snippets and claimed to have read a page she had not fetched. Two news questions in the same session were summarised faithfully from the results. Suspected causes: the model is never told today's date; with thinking off the step after a tool result falls back on the model's prior; the tool guidance does not say results outrank memory or how to handle a dispute. Fixes and a replayable grounding check added to the stability agent's task.
+- Stability fixes by a sub-agent (1336 tests pass including in-progress voice work):
+  - Silent replies. A looping stream sends nothing on the wire, on either Ollama endpoint. The only positive signal is `logprobs`: the hidden tokens show one short block repeated; normal replies have at most 2 such blocks, loops have over 100, so 4 repeats is the threshold, reached in 0.45 to 0.75 s. The adapter detects it (`hidden_loop_repeats = 4`) and the gateway falls back once to `chat_deep`. Replay of looping follow-ups: 10 loops in 24 runs, all detected and recovered, median 0.56 s lost. 40 ordinary turns: 1 true loop recovered, no false triggers. Cost: `logprobs` disables Ollama's speculative decoding, so chat generation is about 35% slower (33 against 49 tokens/s); time to first token is unchanged.
+  - Chat `max_tokens = 1024` as a backstop (longest measured normal reply: 306 tokens). An undetected loop now ends in about 24 to 33 s.
+  - Not fixed: the model sometimes degenerates mid-answer into a repeated Thai token (4 of 16 probes on one follow-up). Text has already been shown, so no retry; `max_tokens` bounds it at about 30 s.
+  - Ollama memory. The 16 GB is the MLX runner's prompt cache, not the context length: memory grew about 0.73 GB per distinct 3.5k-token prompt to the same 16.14 GB ceiling at context 262,144 and 32,768. `num_ctx` is ignored on the OpenAI-compatible endpoint and applies only at load on the native one. No code change; options recorded in `voice.md`.
+  - Earlier turns' tool results are shortened in rebuilt history; `lucy eval` runs with tools off; the chat marker shows what is being looked up.
+  - Grounding (fixed tool results replayed through the real chat path, 14 cases, 4 runs each; all checks passing out of 56): baseline 28; with the date line 38; with the revised tool guidance 42 (46 with realistic snippets for one case); with a deeper step after tool results 49, within noise, so that option is off. Tool choice went to 56 of 56 and false claims of checking fell from 11 to 3. The Apple CEO question now answers John Ternus from Wikipedia.
+  - Still wrong: with uninformative or stale snippets the model answers from memory instead of reading a page; stale "most recent" results are accepted; time-zone conversions are wrong because the date line names no zone. A follow-up sub-agent is working on these.
+- Voice stage 1 built by a sub-agent (`src/lucy/voice/`, the Parakeet and speech adapters, `lucy voice`, the `PlaybackInterrupted` event). No PyTorch in the lock file; the virtual environment grew from 53 MB to 680 MB. The agent never opened the microphone or played sound; everything was verified through audio files. Results are in `voice.md` under "Measured, stage 1".
+  - Headline: median 7.35 s from end of speech to first audio, against the 1.75 s estimate. The cause is memory: the chat model's 16 GB prompt cache plus the speech models exceed the GPU's working set, and Parakeet's first transcription after each chat turn takes 6 to 10 s to page back in (0.1 s when resident). Swap was 11.5 of 12 GB used when checked.
+  - Parakeet weights were made available in the default Hugging Face cache as copy-on-write clones of the survey's download.
+  - Resampling 48 kHz capture to 16 kHz did not hurt recognition.
+  - Known race: an interrupt sent for a turn that has not started is re-sent when it does, and could cancel the user's next turn if the interrupted reply was very short.
+  - To do before voice is pleasant to use: reduce the chat model's memory; hold background model work while the user is speaking; a real-device test by the user (checklist in the README's Voice section).
+- Grounding follow-up by a sub-agent (1361 tests pass):
+  - What the SearXNG instance really returns: only the `google cse` engine produces general results (`brave` is rate-limited and `duckduckgo` shows a CAPTCHA); result order is not score order, so Lucy's top five had been dropping Google's second to fifth results; `answers` is always empty; infoboxes appear only for entity-name queries, with current Wikipedia introductions but sparse and sometimes unresolved Wikidata attributes; dates arrive as text at the start of snippets, not in `publishedDate`.
+  - `web_search` now sorts by score, puts infoboxes first, turns leading snippet dates into "Published ..." and ends every result list with a one-line note that snippets are not pages that were read and that the page should be fetched unless a snippet states the answer and is recent enough. That note was the decisive change: guidance in the system prompt alone did not stop answers from memory when an old snippet agreed with the model's memory.
+  - Grounding check, 24 cases at 4 runs each (out of 96): 53 before, 88 after. The dispute cases went from 0 to 4 of 4; thin and stale snippet cases mostly from 0 to 4. The final wording's full run was still in progress when the agent reported (reps complete so far agree).
+  - Cost: more page fetches, about 1 to 2 s per lookup turn, and up to about 18 s on a weather turn with three fetches.
+  - The date line now names the time zone and offset. That did not fix time-zone conversions (Tokyo 0 of 4): the model cannot do the clock arithmetic with thinking off. Recommended fix: a local time tool using the system time-zone database.
+  - Still wrong: if the fetched page is itself old she answers from it; one case still occasionally answers from memory without fetching.
+  - Suggested for `deploy/searxng/settings.yml`: enable backup general engines and a working news engine.
+- Time tool, weather tool and search engines added by a sub-agent (1495 tests pass):
+  - `time` (local, no network): time-zone cases on the grounding check went from 14 of 36 to 36 of 36, including half-hour offsets, the date line and "9am here is what time there". "What time is it?" with no place is answered from the prompt without the tool.
+  - `weather` (Open-Meteo, approved by the user): in 24 live runs no reply contained a number absent from the tool's output; "around me" used the city held in memory, and with no known location Lucy asked 3 of 3 times. The tool call takes about 1.2 s; the web-search route took 7 to 9 s and sometimes still had no answer.
+  - SearXNG: enabled `duckduckgo web`, `yahoo`, `privacywall` and `yahoo news`; disabled four engines that failed on every query. In a 30-query stress run `google cse` itself became rate-limited after about 50 queries, and every query still returned results from the new engines. Median response went from 0.83 s to 1.17 s.
+  - `web_search` gained `recent` for news; the model set it correctly on 19 of 20 first searches.
+  - Found: with a weather sentence in the prompt but the tool disabled, the model called a tool it was not offered. Guidance sentences are now filtered by enabled tools.
+  - Found, not fixed: in a fresh session Lucy twice repeated a weather answer from an earlier session without a new lookup. Old answers recalled across sessions are a staleness risk for weather and news.
+  - `prompts/tools.md` is now about 663 estimated tokens.
+- GGUF build of the chat model tested by a sub-agent, with the user's approval (no repo changes; `gemma4:12b-it-q4_K_M`, 8.0 GB, pulled; remove with `ollama rm gemma4:12b-it-q4_K_M`). Figures are in `voice.md`. Summary: voice latency drops from a 7.35 s median to under 2 s and memory stays bounded at 9 to 10 GiB, but only with a 32,768 context and a bounded prompt cache set on the Ollama side; grounding is worse (40 to 41 of 56 against 48), and the Apple CEO question is again answered from memory. Not adopted; decision with the user.
+  - The agent measured on a temporary second Ollama server it started on another port with its own environment, sharing the model store read-only, and stopped it afterwards.
+  - Its early runs disturbed other agents' measurements: it evicted and once stopped the MLX model, and at one point both models were loaded and swap reached 24 GB.
+  - Other findings: Ollama's app-level context length is 262,144 and global; `ollama ps` reports the wrong size for llama.cpp models; the MLX build looped on 12 of 12 replays of one "next turn" prompt with tools offered, which the fallback recovers.
+- Home control is planned through Home Assistant's API as act-tier tools. Wyoming is Home Assistant's protocol for voice services, not device control; it is a candidate for STT, TTS and wake-word adapters in the voice phase (to be confirmed against current documentation).
+
 ## 2026-11-12: text brain runs end to end
 
 - A third Opus sub-agent wired the pieces into `src/lucy/app.py` and a `lucy chat` CLI. Turn traces are stored in SQLite (migration 2). Registering the same adapter class twice is now a no-op. 243 tests pass.

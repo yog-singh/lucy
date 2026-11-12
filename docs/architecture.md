@@ -4,7 +4,7 @@ Lucy is a personal assistant that runs entirely on the local machine: she listen
 
 This document is the living overview. Each decision has a short record in [`adr/`](adr/) explaining why it was made. Progress is logged in [`journal.md`](journal.md).
 
-Status: the core and memory designs are agreed. The text brain and memory work: `lucy chat` holds a streaming conversation with a local model, persists every turn, learns from it in the background, and recalls what it learned in later sessions. Voice and tools are not built yet.
+Status: the core and memory designs are agreed. The text brain and memory work: `lucy chat` holds a streaming conversation with a local model, persists every turn, learns from it in the background, and recalls what it learned in later sessions. Internet lookup tools (Wikipedia, web search, page fetch, weather, time) are built and off by default. Voice stage 1 (`lucy voice`, half-duplex) is built and verified through audio files, not yet with a real microphone; it is slow until the chat model's memory use is reduced (see [`voice.md`](voice.md)).
 
 ## System overview
 
@@ -175,12 +175,13 @@ The full design is in [`memory.md`](memory.md). In summary:
 |---|---|
 | Language | Python 3.12, `uv`, asyncio |
 | LLM runtime | Ollama through its OpenAI-compatible API (`gemma4:12b-mlx` for chat, `qwen3.5:2b-mlx` for extraction and summary) |
-| STT | Whisper large-v3-turbo via `mlx-whisper` |
-| VAD / wake word | Silero VAD, openWakeWord |
-| TTS | Kokoro (Piper as fallback) |
+| STT | Parakeet TDT 0.6B v2 via `parakeet-mlx` (see [`voice.md`](voice.md)) |
+| VAD / wake word | Silero VAD (ONNX), openWakeWord with a custom model |
+| TTS | `phonon` served by Ollama (Kokoro as fallback) |
 | Storage | SQLite, `sqlite-vec`, FTS5 |
 | Embeddings | `embeddinggemma-2` via Ollama (768 dimensions) |
-| Server / tools | FastAPI WebSocket, MCP |
+| Tools | `wikipedia`, `web_search` (self-hosted SearXNG) and `fetch_page`, off by default ([ADR 0013](adr/0013-internet-tools.md)) |
+| Server | FastAPI WebSocket (later); MCP for external tools (later) |
 
 Model names are starting points and should be checked against current releases at install time.
 
@@ -201,7 +202,8 @@ src/lucy/
                                              (stt_*.py, tts_*.py: later)
   prompts/   persona.md and one file per memory prompt
   evals/     runner, report and scenarios/*.toml for `lucy eval`
-  tools/     (later)
+  tools/     catalogue, wikipedia.py, web_search.py, fetch_page.py,
+             netguard.py (address checks), html_text.py
   server/    (later)
   clients/   cli.py  memory_cli.py
 tests/
@@ -215,8 +217,8 @@ legacy/      the original scripts
 1. Done: skeleton (repo layout, config, docs, old scripts moved to `legacy/`).
 2. Done: text brain (streaming CLI chat, every turn written to the episode log).
 3. Done: memory (extraction, graph, retrieval, reflection, maintenance, and the eval set).
-4. Voice: STT and TTS half-duplex, then wake word and barge-in.
-5. Tools: weather, wiki, lights, calendar; conversational memory control and the confirmation flow.
+4. Voice: STT and TTS half-duplex, then barge-in and wake word (design in [`voice.md`](voice.md)).
+5. Tools. Done: internet lookup (Wikipedia, web search, page fetch). Remaining: home control through Home Assistant, calendar, conversational memory control, and the confirmation flow.
 6. A graph viewer.
 
 Also planned: automatic reasoning for hard questions (see the journal entry of 2026-11-12).
