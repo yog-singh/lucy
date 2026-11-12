@@ -85,6 +85,9 @@ class VoiceState(StrEnum):
     THINKING = "thinking"
     SPEAKING = "speaking"
     STOPPED = "stopped"
+    # Only shown by `lucy listen` (`lucy.voice.wake`), never set by the session:
+    WAITING = "waiting"  # for the wake phrase
+    STARTING = "starting"  # loading the speech parts after the first wake
 
 
 class VoiceUI(Protocol):
@@ -327,6 +330,17 @@ class VoiceSession:
     @property
     def session_id(self) -> str:
         return self._session_id
+
+    @property
+    def hearing_speech(self) -> bool:
+        """Whether the user is speaking now (an utterance has started and not ended)."""
+        return self._activity == "speaking"
+
+    def forget_audio(self) -> None:
+        """Reset the VAD and the endpointer, dropping any partial utterance (the wake
+        listener calls it before handing over audio after a gap)."""
+        self._vad.reset()
+        self._endpointer.reset()
 
     async def run(self) -> None:
         """Listen and converse until the input ends or `stop` is called."""

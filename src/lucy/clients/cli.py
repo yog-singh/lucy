@@ -28,7 +28,7 @@ from urllib.parse import urlsplit
 
 from lucy.app import JobBacklog, LucyApp
 from lucy.clients import memory_cli, voice_cli
-from lucy.core.config import ConfigError, Settings, load_settings
+from lucy.core.config import ConfigError, Settings, WakeSettings, load_settings
 from lucy.core.events import Interrupt, TextDelta, ToolStarted, TurnEnded, UserMessage
 from lucy.core.types import ToolCall
 
@@ -456,6 +456,7 @@ def _parser() -> argparse.ArgumentParser:
         help=f"conversation to continue or start (default: {DEFAULT_SESSION!r})",
     )
     voice_cli.add_parser(commands, common)
+    voice_cli.add_listen_parser(commands, common)
 
     memory = commands.add_parser(
         "memory",
@@ -694,6 +695,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             return done
     if args.command == "voice" and args.list_devices:
         return voice_cli.list_devices(sys.stdout, sys.stderr)
+    if args.command == "listen" and args.download_models and args.config is None:
+        if not DEFAULT_CONFIG.exists():  # no settings needed: the default model directory
+            download = voice_cli.download_wake_models(
+                WakeSettings().model, out=sys.stdout, err=sys.stderr
+            )
+            return asyncio.run(download)
     try:
         settings = _load_settings(args.config)
     except ConfigError as exc:
@@ -706,6 +713,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return asyncio.run(_eval(settings, args))
         if args.command == "voice":
             return asyncio.run(voice_cli.run_voice(settings, args, out=sys.stdout, err=sys.stderr))
+        if args.command == "listen":
+            return asyncio.run(voice_cli.run_listen(settings, args, out=sys.stdout, err=sys.stderr))
         return asyncio.run(_chat(settings, args.session))
     except KeyboardInterrupt:  # Ctrl-C while starting or stopping
         print(file=sys.stderr)
