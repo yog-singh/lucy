@@ -66,9 +66,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Final
 
-from lucy.memory.graph_store import DERIVED_META_PREFIX
 from lucy.memory.models import Origin, Statement, StatementKind
-from lucy.memory.ports import GraphStore
+from lucy.memory.ports import DERIVED_META_PREFIX, GraphStore
 
 log = logging.getLogger(__name__)
 

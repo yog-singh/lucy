@@ -44,6 +44,28 @@ too). These guard rails are then enforced in code, whatever the model said:
 - `also_ends` only ends current habits and goals of the same subject that
   were shown, other than the target, and only with a supersession.
 
+Change events. Extraction marks a candidate that describes a change rather
+than a state ("The user switched to decaf"; `change=True`). Such a text is
+worded unlike the state it replaces ("The user drinks dark roast coffee":
+0.81 with `embeddinggemma-2`, under the similarity floor), so it would be
+added beside the old state, which stays current. For a change event:
+
+- current statements of the subject at least
+  `MemoryPolicy.change_similarity_floor` similar are shown too (same subject,
+  siblings left out, at most `SHOWN_MAX` in all);
+- the model is always asked, exactly once, with the candidate marked "(a
+  change)" and a schema (`ChangeDecision`) that first asks for the new state
+  in the form of the statement it replaces ("The user drinks decaf coffee"),
+  then for the action. The new state replaces the candidate's text and
+  predicate when it is usable (`_new_state`); a reworded change that
+  supersedes a fact, preference or habit takes that statement's kind;
+- the decision then goes through the same guard rails as any other. A
+  reworded change that repeats a sibling is a duplicate. A change that was
+  not reworded and whose target was already replaced from this turn is
+  ignored (a sibling stored the new state: "moved from Lisbon" beside "lives
+  in Porto"); a reworded one is added ("takes notes in Obsidian" beside "gave
+  up Evernote").
+
 Dates: a superseded (or ended) statement ends when the replacement starts:
 the date the user gave for the change (`valid_from`), or else the time of the
 message it was learned from (`observed_at`), never the time reconciliation
@@ -67,7 +89,7 @@ from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
-from typing import Final, Literal, Protocol, runtime_checkable
+from typing import Final, Literal
 
 from pydantic import BaseModel, Field
 
@@ -75,10 +97,9 @@ from lucy.core.gateway import LLMGateway, Priority
 from lucy.core.jobs import utc_now
 from lucy.core.types import Message, Role
 from lucy.memory import fts
-from lucy.memory.graph_store import GraphStoreError
 from lucy.memory.models import NewStatement, Origin, ScoredStatement, Statement, StatementKind
 from lucy.memory.policy import MemoryPolicy
-from lucy.memory.ports import GraphStore
+from lucy.memory.ports import GraphStore, GraphStoreError
 from lucy.prompts import load_prompt
 
 log = logging.getLogger(__name__)
@@ -95,18 +116,24 @@ _ENDABLE: Final = frozenset({StatementKind.HABIT, StatementKind.GOAL})
 MAX_ALSO_ENDS: Final = 3
 #: A predicate saying the user stopped something ("gave up", "stopped", "quit").
 _ENDING: Final = re.compile(r"\b(?:gave up|give up|given up|stopped|quit|dropped|no longer)\b")
-
-
-@runtime_checkable
-class EndsStatements(Protocol):
-    """A store that can end a statement because of another (`SQLiteGraphStore.end_statement`).
-
-    Not (yet) part of `GraphStore`; without it, `also_ends` is logged and skipped.
-    """
-
-    async def end_statement(
-        self, statement_id: int, at: datetime, *, superseded_by: int | None = None
-    ) -> Statement: ...
+#: Words of a change event that a statement of the new state must not use.
+_CHANGE_WORDS: Final = re.compile(
+    r"\b(?:switch(?:ed|es)?|mov(?:ed|es)|relocated|chang(?:ed|es)|swapp?(?:ed|s)?|"
+    r"start(?:ed|s)|took up|joined)\b",
+    re.I,
+)
+#: A negated state ("does not work at Brightline"): only says what ended.
+_NEGATED: Final = re.compile(
+    r"\b(?:does not|doesn't|do not|don't|is not|isn't|no longer|not any ?more)\b", re.I
+)
+#: Longest new-state text accepted from the model, in characters.
+_MAX_NEW_TEXT: Final = 300
+#: A word starting with a capital letter (a name, or the first word of a sentence).
+_CAPITALISED: Final = re.compile(r"\b[A-Z][\w'&-]*")
+#: A word.
+_WORD: Final = re.compile(r"[\w'&-]+")
+#: Kinds a reworded change takes over from the statement it replaces.
+_SAME_FORM: Final = frozenset({StatementKind.FACT, StatementKind.PREFERENCE, StatementKind.HABIT})
 
 
 class Outcome(StrEnum):
@@ -124,6 +151,20 @@ class ReconcileDecision(BaseModel):
     """The model's choice for a candidate. `target` and `also_ends` are numbers of listed
     statements (mapped to statement ids, -1 for a number not shown, after the call)."""
 
+    action: Literal["add", "reinforce", "supersede", "ignore"]
+    target: int | None = None
+    also_ends: list[int] = Field(default_factory=list)
+
+
+class ChangeDecision(BaseModel):
+    """The model's choice for a change event, after the new state it led to.
+
+    `new_text` / `new_predicate` say what is true now, in the form of the
+    statement the change replaces; written first so the decision is about them.
+    """
+
+    new_text: str | None = None
+    new_predicate: str | None = None
     action: Literal["add", "reinforce", "supersede", "ignore"]
     target: int | None = None
     also_ends: list[int] = Field(default_factory=list)
@@ -189,6 +230,7 @@ class Reconciler:
         episode_ids: Sequence[int],
         *,
         pass_episodes: Collection[int] = (),
+        change: bool = False,
     ) -> ReconcileResult:
         """Merge the candidate `new`, learned from `episode_ids`, into the graph.
 
@@ -196,6 +238,9 @@ class Reconciler:
         extraction, the turn's user messages; empty for reflection):
         statements learned only from them are siblings from the same pass and
         are not reconciled against (module docstring).
+
+        `change`: `new` describes a change ("switched to decaf") rather than a
+        state; see "Change events" in the module docstring.
         """
         episodes = sorted(set(episode_ids))
         same_pass = set(pass_episodes)
@@ -245,12 +290,35 @@ class Reconciler:
         # turn, or from an interrupted earlier run of it) are not reconciled
         # against: the user does not contradict or repeat themselves within one
         # turn, and the model returned them as separate statements.
+        now = self._clock()
         shown = [
             h
             for h in hits
-            if h.score >= policy.statement_similarity_floor and not sibling(h.statement)
+            if not sibling(h.statement)
+            and (
+                h.score >= policy.statement_similarity_floor
+                or (
+                    change
+                    and h.score >= policy.change_similarity_floor
+                    and h.statement.is_current(now)
+                )
+            )
         ][:SHOWN_MAX]
-        if not shown:
+        if change:
+            change_decision = await self._ask_change(new, shown)
+            new, rewritten = self._new_state(new, change_decision, shown)
+            decision = ReconcileDecision(
+                action=change_decision.action,
+                target=change_decision.target,
+                also_ends=change_decision.also_ends,
+            )
+            repeated = await self._repeats_sibling(new, sibling) if rewritten else None
+            if repeated is not None:
+                return repeated
+            result = await self._apply(
+                new, episodes, same_pass, shown, decision, change=True, reworded=rewritten
+            )
+        elif not shown:
             result = await self._add(new, episodes, asked=False, reason="nothing similar")
         else:
             decision = await self._ask(new, shown)
@@ -260,11 +328,26 @@ class Reconciler:
     # --- The model's decision -------------------------------------------------
 
     async def _ask(self, new: NewStatement, shown: list[ScoredStatement]) -> ReconcileDecision:
+        messages = self._messages(new, shown)
+        decision = await self._gateway.generate(
+            self.role, messages, ReconcileDecision, priority=self.priority
+        )
+        return self._ids(decision, shown)
+
+    async def _ask_change(self, new: NewStatement, shown: list[ScoredStatement]) -> ChangeDecision:
+        """One call for a change event: the new state, and what it does to `shown`."""
+        messages = self._messages(new, shown, change=True)
+        decision = await self._gateway.generate(
+            self.role, messages, ChangeDecision, priority=self.priority
+        )
+        return self._ids(decision, shown)
+
+    def _messages(
+        self, new: NewStatement, shown: list[ScoredStatement], *, change: bool = False
+    ) -> list[Message]:
         now = self._clock()
         number = {h.statement.id: i for i, h in enumerate(shown, start=1)}
-        lines = [
-            "Known statements:",
-        ]
+        lines = ["Known statements:" if shown else "Known statements: none"]
         for i, hit in enumerate(shown, start=1):
             s = hit.statement
             if s.is_current(now):
@@ -277,20 +360,23 @@ class Reconciler:
                 elif s.superseded_by is not None:
                     status += ", replaced"
             lines.append(f"[{i}] {s.text} ({_describe(s)}; {status})")
+        marked = " (a change)" if change else ""
         lines += [
             "",
-            f"New statement: {new.text} ({new.kind.value}, {new.origin.value})",
+            f"New statement{marked}: {new.text} ({new.kind.value}, {new.origin.value})",
         ]
-        messages = [
+        return [
             Message(role=Role.SYSTEM, content=self._prompt),
             Message(role=Role.USER, content="\n".join(lines)),
         ]
-        decision = await self._gateway.generate(
-            self.role, messages, ReconcileDecision, priority=self.priority
-        )
+
+    @staticmethod
+    def _ids[D: (ReconcileDecision, ChangeDecision)](
+        decision: D, shown: list[ScoredStatement]
+    ) -> D:
+        """`decision` with shown numbers mapped back to statement ids (-1: not shown)."""
 
         def to_id(number: int) -> int:
-            # Map a shown number back to the statement id (-1: not shown).
             return shown[number - 1].statement.id if 1 <= number <= len(shown) else -1
 
         return decision.model_copy(
@@ -299,6 +385,78 @@ class Reconciler:
                 "also_ends": [to_id(n) for n in dict.fromkeys(decision.also_ends)],
             }
         )
+
+    # --- Change events ----------------------------------------------------------
+
+    def _new_state(
+        self, new: NewStatement, decision: ChangeDecision, shown: list[ScoredStatement]
+    ) -> tuple[NewStatement, bool]:
+        """`new` reworded as the state the change led to, and whether it was.
+
+        The model's wording is used only if it is a plausible statement of a
+        state: not empty or overlong, without the words of a change, not a
+        negation the candidate did not make ("left Brightline" stays as it
+        is rather than becoming "does not work at Brightline"), and
+        naming no one that neither the candidate nor a shown statement names
+        (so an example's "Sam" cannot slip in). Otherwise `new` is kept as it
+        is. The predicate falls back to the replaced statement's (or the
+        candidate's) when the model's is missing or still describes a change.
+        """
+        text = " ".join((decision.new_text or "").split())
+        problem = None
+        if not text:
+            problem = "no new state given"
+        elif len(text) > _MAX_NEW_TEXT:
+            problem = "new state too long"
+        elif _CHANGE_WORDS.search(text):
+            problem = "new state still describes a change"
+        elif _NEGATED.search(text) and not _NEGATED.search(new.text):
+            # "left Brightline" says what ended, not what is true instead;
+            # "does not work at Brightline" would read as a statement about
+            # working there.
+            problem = "the change only says what ended"
+        else:
+            known = {
+                word.lower()
+                for source in (new.text, *(h.statement.text for h in shown))
+                for word in _WORD.findall(source)
+            }
+            invented = [w for w in _CAPITALISED.findall(text) if w.lower() not in known]
+            if invented:
+                problem = f"new state names {', '.join(invented)}"
+        if problem is not None:
+            log.info("change event %r kept as it is: %s", new.text, problem)
+            return new, False
+        predicate = " ".join((decision.new_predicate or "").split())
+        if not predicate or _CHANGE_WORDS.search(predicate):
+            target = next((h.statement for h in shown if h.statement.id == decision.target), None)
+            predicate = target.predicate if target is not None else new.predicate
+        log.info("change event %r stored as the new state %r", new.text, text)
+        return new.model_copy(update={"text": text, "predicate": predicate}), True
+
+    async def _repeats_sibling(
+        self, new: NewStatement, sibling: Callable[[Statement], bool]
+    ) -> ReconcileResult | None:
+        """A duplicate result if the reworded change says what a statement from the
+        same pass already says (same predicate, similar text), else None."""
+        hits = await self._graph.similar_statements(
+            new.text, subject_id=new.subject_id, k=SIMILAR_K, include_invalid=True
+        )
+        for hit in hits:
+            s = hit.statement
+            if (
+                sibling(s)
+                and hit.score >= self.policy.statement_similarity_floor
+                and _same_predicate(new, s)
+            ):
+                return ReconcileResult(
+                    Outcome.DUPLICATE,
+                    s,
+                    s.id,
+                    asked_model=True,
+                    reason="the new state of this change is already stored from this turn",
+                )
+        return None
 
     # --- Guard rails ------------------------------------------------------------
 
@@ -331,6 +489,9 @@ class Reconciler:
         same_pass: set[int],
         shown: list[ScoredStatement],
         decision: ReconcileDecision,
+        *,
+        change: bool = False,
+        reworded: bool = False,
     ) -> ReconcileResult:
         now = self._clock()
         by_id = {h.statement.id: h.statement for h in shown}
@@ -373,6 +534,22 @@ class Reconciler:
                 notes.append(f"{target.id} is not current and has no current successor: add")
                 return await self._add(new, episodes, asked=True, reason="; ".join(notes))
             if same_pass and set(head.sources) <= same_pass:
+                if change and not reworded:
+                    # The turn already stored that the old state ended, and the
+                    # change was not reworded into a new state: it says nothing
+                    # more ("moved from Lisbon" beside "lives in Porto"). A
+                    # reworded one ("takes notes in Obsidian" beside "gave up
+                    # Evernote") is new and is added below; one that repeats a
+                    # sibling was already caught (`_repeats_sibling`).
+                    notes.append(
+                        f"{target.id} was already replaced from this turn by {head.id}: ignore"
+                    )
+                    return ReconcileResult(
+                        Outcome.IGNORE,
+                        target_id=target.id,
+                        asked_model=True,
+                        reason="; ".join(notes),
+                    )
                 notes.append(f"{target.id} was already replaced from this turn by {head.id}: add")
                 return await self._add(new, episodes, asked=True, reason="; ".join(notes))
             if action == "reinforce":
@@ -400,6 +577,10 @@ class Reconciler:
 
         if action == "reinforce":
             return await self._reinforce(new, episodes, target, "; ".join(notes))
+        if reworded and target.kind in _SAME_FORM and new.kind is not target.kind:
+            # The new state of a change, in the form of the state it replaces.
+            notes.append(f"stored as a {target.kind.value}, like {target.id}")
+            new = new.model_copy(update={"kind": target.kind})
         also = self._also_ends(new, target, decision.also_ends, by_id, notes)
         if new.kind is StatementKind.DECISION and any(s.kind in _ENDABLE for s in (target, *also)):
             notes.append("a goal or habit is closed by a fact")
@@ -537,11 +718,6 @@ class Reconciler:
         replacement = result.statement
         assert replacement is not None
         graph = self._graph
-        if not isinstance(graph, EndsStatements):
-            log.warning(
-                "the graph store cannot end statements; not ending %s", [s.id for s in also]
-            )
-            return result
         closed = None
         if result.outcome is Outcome.SUPERSEDE and result.target_id is not None:
             closed = await self._graph.get_statement(result.target_id)

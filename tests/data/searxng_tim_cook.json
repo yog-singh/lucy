@@ -1,0 +1,157 @@
+{
+ "query": "Tim Cook",
+ "results": [
+  {
+   "title": "Tim Cook - Wikipedia",
+   "content": "Tim Cook ... For other people named Tim Cook, see Tim Cook (disambiguation). Timothy Donald Cook (born November 1, 1960) is an American business executive who ...",
+   "url": "https://en.wikipedia.org/wiki/Tim_Cook",
+   "engine": "google cse",
+   "engines": [
+    "google cse"
+   ],
+   "positions": [
+    1
+   ],
+   "score": 1.0,
+   "publishedDate": null,
+   "category": "general",
+   "template": "default.html"
+  },
+  {
+   "title": "Tim Cook - Apple Wiki - Fandom",
+   "content": "Title. Executive Chair. Timothy Donald Cook (born November 1, 1960) is the Executive Chairman of Apple and serves on its Board of Directors. He previously ...",
+   "url": "https://apple.fandom.com/wiki/Tim_Cook",
+   "engine": "google cse",
+   "engines": [
+    "google cse"
+   ],
+   "positions": [
+    14
+   ],
+   "score": 0.07142857142857142,
+   "publishedDate": null,
+   "category": "general",
+   "template": "default.html"
+  },
+  {
+   "title": "Tim Cook - Simple English Wikipedia, the free encyclopedia",
+   "content": "Timothy Donald \"Tim\" Cook (November 1, 1960) is an American businessman who is the executive chairman of Apple Inc.. ... He joined the company in March 1998. ... On ...",
+   "url": "https://simple.wikipedia.org/wiki/Tim_Cook",
+   "engine": "google cse",
+   "engines": [
+    "google cse"
+   ],
+   "positions": [
+    18
+   ],
+   "score": 0.05555555555555555,
+   "publishedDate": null,
+   "category": "general",
+   "template": "default.html"
+  },
+  {
+   "title": "Tim Cook - Apple Leadership",
+   "content": "Executive Chair. Tim Cook has been a director since 2011 and serves as the executive chair of the board. He joined Apple in 1998 and served as the company's CEO ...",
+   "url": "https://www.apple.com/in/leadership/tim-cook/",
+   "engine": "google cse",
+   "engines": [
+    "google cse"
+   ],
+   "positions": [
+    2
+   ],
+   "score": 0.5,
+   "publishedDate": null,
+   "category": "general",
+   "template": "default.html"
+  },
+  {
+   "title": "Tim Cook (@tim_cook) / X",
+   "content": "Tim Cook ... There are people who leave a mark on the world, and then there are people who change it entirely. Steve changed the world and so many lives in the ...",
+   "url": "https://x.com/tim_cook?lang=en",
+   "engine": "google cse",
+   "engines": [
+    "google cse"
+   ],
+   "positions": [
+    3
+   ],
+   "score": 0.3333333333333333,
+   "publishedDate": null,
+   "category": "general",
+   "template": "default.html"
+  },
+  {
+   "title": "Tim Cook - Forbes",
+   "content": "Last Updated Mar 10, 2026, 1:01am EDT. Tim Cook is the · Tim Cook is the CEO of Apple, one of the world's most · Cook, who became chief executive in 2011, ...",
+   "url": "https://www.forbes.com/profile/tim-cook/",
+   "engine": "google cse",
+   "engines": [
+    "google cse"
+   ],
+   "positions": [
+    4
+   ],
+   "score": 0.25,
+   "publishedDate": null,
+   "category": "general",
+   "template": "default.html"
+  }
+ ],
+ "answers": [],
+ "corrections": [],
+ "infoboxes": [
+  {
+   "infobox": "Tim Cook",
+   "id": "https://en.wikipedia.org/wiki/Tim_Cook",
+   "content": "Timothy Donald Cook is an American business executive who served as the chief executive officer (CEO) of Apple from August 24, 2011 to August 31, 2026, and has been the company's executive chairman since September 1, 2026. Cook joined the technology company in 1998 as senior vice president for worldwide operations, and later served as vice president for worldwide sales and operations and then as chief operating officer under co-founder Steve Jobs. He was appointed chief executive in 2011, when Jobs resigned due to failing health. Under Cook, Apple grew into one of the world's most valuable companies; in 2025 it was the second largest technology company by revenue in the world, at US $416 billion. Cook led a succession plan that saw John Ternus succeed him as CEO.",
+   "urls": [
+    {
+     "title": "Wikipedia",
+     "url": "https://en.wikipedia.org/wiki/Tim_Cook"
+    },
+    {
+     "title": "Official website",
+     "url": "https://www.apple.com/leadership/tim-cook/",
+     "official": true
+    },
+    {
+     "title": "Twitter",
+     "url": "https://twitter.com/tim_cook"
+    },
+    {
+     "title": "Wikidata",
+     "url": "http://www.wikidata.org/entity/Q265852"
+    }
+   ],
+   "attributes": [
+    {
+     "label": "Date of birth",
+     "value": "Tuesday, November 1, 1960",
+     "entity": "P569"
+    },
+    {
+     "label": "Country of citizenship",
+     "value": "United States",
+     "entity": "P27"
+    }
+   ],
+   "engine": "wikidata",
+   "engines": [
+    "wikidata",
+    "wikipedia"
+   ]
+  }
+ ],
+ "suggestions": [],
+ "unresponsive_engines": [
+  [
+   "brave",
+   "Suspended: too many requests"
+  ],
+  [
+   "duckduckgo",
+   "CAPTCHA"
+  ]
+ ]
+}

@@ -13,17 +13,70 @@
 # caps a runaway structured response (one uncapped run hung for over 150 s).
 # The summary role writes the profile and entity summaries and checks
 # duplicate-entity merges.
-chat       = { adapter = "ollama", model = "gemma4:12b-mlx", context_window = 32768, extra = { reasoning_effort = "none" } }
+#
+# Silent replies: with thinking off and tools offered (or tool calls earlier in
+# the conversation), gemma4:12b-mlx sometimes repeats an empty thought block
+# that Ollama strips, so nothing arrives. `hidden_loop_repeats` asks Ollama for
+# logprobs, which show those hidden tokens, and ends such a reply after the
+# block repeats 4 times (about 0.6 s; normal replies have at most 2). Cost:
+# logprobs switch off Ollama's speculative decoding, so replies generate about
+# a third slower (33 instead of 49 tokens/s); remove the option to trade that
+# for slower recovery. A reply that produces nothing is then asked once more of
+# `fallback`, the same model with thinking on (never seen to loop), and the
+# retry is logged and shown in the turn's trace. `first_output_timeout` gives
+# up on a reply that shows nothing for that many seconds (a long uncached
+# prompt can take about 35 s before its first token). `max_tokens` is a
+# backstop: the longest replies measured were about 300 tokens, and a loop
+# that is not detected ends at the cap (about 30 s) instead of the 120 s read
+# timeout. Adding `after_tool = "chat_deep"` to the chat role would answer every
+# lookup with thinking on: on Lucy's grounding check it followed the looked-up
+# facts slightly more often (49 against 46 of 56) but its first word after a
+# lookup came about 1.6 s later, so it is off.
+chat       = { adapter = "ollama", model = "gemma4:12b-mlx", context_window = 32768, hidden_loop_repeats = 4, fallback = "chat_deep", first_output_timeout = 60, extra = { reasoning_effort = "none", max_tokens = 1024 } }
+chat_deep  = { adapter = "ollama", model = "gemma4:12b-mlx", context_window = 32768, extra = { reasoning_effort = "low", max_tokens = 4096 } }
 extraction = { adapter = "ollama", model = "gemma4:12b-mlx", context_window = 32768, temperature = 0, extra = { reasoning_effort = "none", max_tokens = 2048 } }
 summary    = { adapter = "ollama", model = "gemma4:12b-mlx", context_window = 32768, extra = { reasoning_effort = "none", max_tokens = 1024 } }
 
 [stt]
-adapter = "mlx_whisper"
-model   = "large-v3-turbo"
+# Speech recognition for `lucy voice` (only loaded by it). Parakeet runs in
+# this process on Apple silicon; its weights (2.5 GB) are downloaded from
+# Hugging Face on first use. `cache_limit_mb` caps MLX's buffer cache (without
+# it the memory footprint nearly doubles).
+adapter        = "parakeet_mlx"
+model          = "mlx-community/parakeet-tdt-0.6b-v2"
+cache_limit_mb = 256
 
 [tts]
-adapter = "kokoro"
-voice   = "af_heart"
+# Speech synthesis for `lucy voice`, served by Ollama (`ollama pull phonon`).
+# `phonon` (phonon:latest) is the Apache-2.0 build; phonon:40m-en is licensed
+# for non-commercial use only. `voice` is "default" or one of the model's named
+# voices (`ollama show phonon --verbose`, or an unknown name lists them).
+adapter = "ollama"
+model   = "phonon"
+voice   = "default"
+
+[voice]
+# Optional; these are the defaults. How `lucy voice` listens.
+# Silence after speech that ends your turn. Lower answers sooner but may cut
+# you off when you pause mid-sentence.
+endpoint_silence_ms = 600
+# Continuous speech needed before Lucy treats a sound as speech (clicks and
+# knocks are shorter).
+min_speech_ms       = 160
+# Audio kept from just before speech was detected, so the first syllable is
+# not lost.
+preroll_ms          = 300
+# Longest single utterance; a longer one is sent as it is.
+max_utterance_s     = 30
+# How long the microphone stays ignored after Lucy stops speaking, so she does
+# not hear the end of her own voice.
+tail_ms             = 300
+# Speech probability (Silero VAD) from which a 32 ms frame counts as speech.
+vad_threshold       = 0.5
+# Devices: a number or part of a name from `lucy voice --list-devices`. Unset
+# means the system default microphone and speaker.
+# input_device  = "MacBook Pro Microphone"
+# output_device = "MacBook Pro Speakers"
 
 [embedder]
 # Ollama adds no prefixes (the model template is the bare prompt), so the
@@ -78,3 +131,49 @@ keyword_min_similarity = 0.62
 entity_min_similarity  = 0.75
 # At most this many statements per turn.
 max_statements         = 8
+
+[tools]
+# Optional. Tools let the chat model look things up, mostly on the internet.
+# None are enabled by default, so Lucy makes no network requests of her own.
+# Enabling a web tool sends data off this machine: `wikipedia` sends the
+# search query to Wikipedia; `web_search` sends it to the SearXNG instance
+# below, which passes it on to the search engines it queries; `fetch_page`
+# requests the page address the model chose from that site. `time` gives the
+# date and time in a named city, country or time zone from this machine's
+# time-zone database; it sends nothing off the machine and has no options.
+# `weather` sends the place name the model chose to Open-Meteo's geocoding
+# service (geocoding-api.open-meteo.com) and that place's coordinates, rounded
+# to two decimals (about a kilometre), to its forecast service
+# (api.open-meteo.com); nothing else. Open-Meteo's free API needs no key and is
+# for non-commercial use (under 10,000 calls a day; data under CC BY 4.0).
+# To opt in, uncomment:
+# enabled = ["wikipedia", "web_search", "fetch_page", "time", "weather"]
+#
+# Every internet tool also takes `max_chars` (longest result given to the
+# model, default 6000) and `timeout` (seconds per call, default 10).
+
+[tools.wikipedia]
+# Wikipedia language edition, as in its address (en.wikipedia.org).
+language = "en"
+
+[tools.web_search]
+# Your SearXNG instance (required when web_search is enabled). deploy/searxng/
+# runs one on this address; see its README.
+searxng_url = "http://127.0.0.1:8890"
+max_results = 5
+
+[tools.fetch_page]
+# fetch_page reads only public web pages: http(s) addresses without passwords
+# whose host resolves to public IP addresses, each redirect checked again, with
+# size, time and content-type limits. This keeps a page's text from steering
+# the model into local services (the router, Ollama, SearXNG). Hosts listed
+# here may be on the local network anyway: exact host names, IP addresses or
+# networks, e.g. ["homeassistant.local", "192.168.1.20"]. Keep it empty
+# unless you need it.
+allow_private_hosts = []
+max_bytes           = 2000000
+max_redirects       = 5
+
+[tools.weather]
+# "metric" (°C, km/h, mm) or "imperial" (°F, mph, inches).
+units = "metric"

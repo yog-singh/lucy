@@ -23,15 +23,20 @@ import sys
 import threading
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
-from typing import Final, TextIO
+from typing import Any, Final, TextIO
+from urllib.parse import urlsplit
 
 from lucy.app import JobBacklog, LucyApp
-from lucy.clients import memory_cli
+from lucy.clients import memory_cli, voice_cli
 from lucy.core.config import ConfigError, Settings, load_settings
 from lucy.core.events import Interrupt, TextDelta, ToolStarted, TurnEnded, UserMessage
+from lucy.core.types import ToolCall
 
 DEFAULT_CONFIG: Final = Path("lucy.toml")
 DEFAULT_SESSION: Final = "cli"
+PROMPT: Final = "you> "
+#: Input history of `lucy chat` at a terminal, kept next to the database.
+HISTORY_FILE_NAME: Final = "chat_history"
 QUIT_COMMANDS: Final = frozenset({"/quit", "/exit"})
 _HISTORY_COUNT_LIMIT: Final = 1_000_000
 
@@ -46,6 +51,9 @@ class ChatLoop:
     while a reply is streaming it publishes an `Interrupt` for the session and
     the loop keeps waiting for that turn's `TurnEnded`; at the prompt it ends
     the chat.
+
+    With `reader_prompts`, `read_line` draws the prompt itself (`TerminalReader`)
+    and the loop writes neither the prompt nor the line end after it.
     """
 
     def __init__(
@@ -57,6 +65,7 @@ class ChatLoop:
         out: TextIO,
         err: TextIO,
         echo_input: bool = False,
+        reader_prompts: bool = False,
     ) -> None:
         self._app = app
         self._session_id = session_id
@@ -64,6 +73,7 @@ class ChatLoop:
         self._out = out
         self._err = err
         self._echo_input = echo_input
+        self._reader_prompts = reader_prompts
         self._in_turn = False
         self._quit = asyncio.Event()
         self._interrupts: set[asyncio.Task[None]] = set()
@@ -115,7 +125,8 @@ class ChatLoop:
 
     async def _next_line(self) -> str | None:
         """Prompt and wait for a line, or None on end of input or Ctrl-C at the prompt."""
-        self._write("you> ")
+        if not self._reader_prompts:
+            self._write(PROMPT)
         reader = asyncio.ensure_future(self._read_line())
         quitter = asyncio.ensure_future(self._quit.wait())
         try:
@@ -129,7 +140,7 @@ class ChatLoop:
             self._write("\n")
             return None
         line = reader.result()
-        if line is None:
+        if line is None and not self._reader_prompts:
             self._write("\n")
         elif self._echo_input:
             self._write(line + "\n")
@@ -163,7 +174,11 @@ class ChatLoop:
                             self._write(delta)
                             at_line_start = delta.endswith("\n")
                     elif isinstance(event, ToolStarted):
-                        self._print_err(f"[using {event.call.name}]")
+                        # The marker gets a line of its own, before the reply text.
+                        if not at_line_start:
+                            self._write("\n")
+                            at_line_start = True
+                        self._print_err(tool_marker(event.call))
                     elif isinstance(event, TurnEnded):
                         if event.reason == "interrupted":
                             self._write(" [interrupted]\n")
@@ -183,6 +198,51 @@ class ChatLoop:
     def _print_err(self, text: str) -> None:
         self._err.write(text + "\n")
         self._err.flush()
+
+
+_MARKER_ARGUMENT_CHARS: Final = 60
+
+
+def _one_line(value: object) -> str:
+    """A model-chosen argument, on one line and shortened."""
+    text = " ".join(str(value).split())
+    if len(text) > _MARKER_ARGUMENT_CHARS:
+        text = text[: _MARKER_ARGUMENT_CHARS - 1].rstrip() + "…"
+    return text
+
+
+def _quoted(value: object) -> str:
+    """A model-chosen argument, on one line and shortened, in quotes."""
+    return f'"{_one_line(value)}"'
+
+
+def tool_marker(call: ToolCall) -> str:
+    """The line shown while a tool runs, e.g. `[looking up "Mount Kilimanjaro" on wikipedia]`.
+
+    `fetch_page` shows only the host of the address; `time` and `weather` show the
+    place, e.g. `[checking the time in Tokyo]`. Other tools show their name and their first
+    text argument, if any.
+    """
+    args = call.arguments
+    query = args.get("query")
+    if call.name == "wikipedia" and isinstance(query, str) and query.strip():
+        return f"[looking up {_quoted(query)} on wikipedia]"
+    if call.name == "web_search" and isinstance(query, str) and query.strip():
+        return f"[searching the web for {_quoted(query)}]"
+    place = args.get("place")
+    if call.name == "time" and isinstance(place, str) and place.strip():
+        return f"[checking the time in {_one_line(place)}]"
+    if call.name == "weather" and isinstance(place, str) and place.strip():
+        return f"[checking the weather in {_one_line(place)}]"
+    if call.name == "fetch_page":
+        url = args.get("url")
+        try:
+            host = urlsplit(url).hostname if isinstance(url, str) else None
+        except ValueError:
+            host = None
+        return f"[reading {host}]" if host else "[reading a web page]"
+    text = next((v for v in args.values() if isinstance(v, str) and v.strip()), None)
+    return f"[using {call.name}: {_quoted(text)}]" if text else f"[using {call.name}]"
 
 
 def _jobs(n: int) -> str:
@@ -276,6 +336,74 @@ class StdinReader:
             pass
 
 
+class TerminalReader:
+    """Reads lines at an interactive terminal with line editing and input history.
+
+    Why prompt_toolkit rather than the standard library's `readline` (with
+    `input()` in a thread): a blocking `input()` cannot be cancelled, so a
+    Ctrl-C or a quit while it waits would leave the thread blocked with the
+    terminal still in readline's raw mode, and `input()` reads through
+    `sys.stdin`, whose buffer lock interpreter shutdown then waits for (see
+    `StdinReader`). macOS Pythons also ship libedit instead of GNU readline,
+    which behaves differently. prompt_toolkit's `prompt_async` runs on the event
+    loop, is cancellable, and restores the terminal when it returns or is
+    cancelled. It is used only here, for an interactive terminal; piped input
+    keeps `StdinReader`.
+
+    How the existing behaviour is kept: while the prompt is shown the terminal
+    is in raw mode, so Ctrl-C arrives as a key, not as SIGINT; prompt_toolkit
+    raises `KeyboardInterrupt` for it and `EOFError` for Ctrl-D on an empty
+    line, and both mean "end of input" (the chat exits). Between prompts the
+    terminal is back in normal mode, so Ctrl-C during a reply is SIGINT and
+    reaches the chat's own handler. `handle_sigint=False` stops prompt_toolkit
+    from installing (and on return removing) its own SIGINT handler, which
+    would remove the chat's; `set_exception_handler=False` leaves the loop's
+    exception handler alone.
+    """
+
+    def __init__(
+        self,
+        prompt: str = PROMPT,
+        history_file: Path | None = None,
+        *,
+        input: Any = None,
+        output: Any = None,
+    ) -> None:
+        from prompt_toolkit import PromptSession
+        from prompt_toolkit.history import FileHistory, History, InMemoryHistory
+
+        history: History = InMemoryHistory()
+        if history_file is not None:
+            try:
+                history_file.parent.mkdir(parents=True, exist_ok=True)
+                history_file.touch()
+                history = FileHistory(history_file)
+            except OSError as exc:  # unwritable: keep history for this run only
+                logging.getLogger(__name__).warning(
+                    "cannot use the history file %s: %s", history_file, exc
+                )
+        self._prompt = prompt
+        self._session: Any = PromptSession(history=history, input=input, output=output)
+
+    async def readline(self) -> str | None:
+        """The next line, edited at the prompt, or None on Ctrl-D or Ctrl-C."""
+        try:
+            line: str = await self._session.prompt_async(
+                self._prompt, handle_sigint=False, set_exception_handler=False
+            )
+        except (EOFError, KeyboardInterrupt):
+            return None
+        return line
+
+
+def chat_history_path(settings: Settings) -> Path:
+    """Where `lucy chat` keeps input history: beside the SQLite database, else in data/."""
+    path = settings.memory.options.get("path") if settings.memory is not None else None
+    if isinstance(path, str) and path and path != ":memory:":
+        return Path(path).parent / HISTORY_FILE_NAME
+    return Path("data") / HISTORY_FILE_NAME
+
+
 # --- Logging ------------------------------------------------------------------
 
 
@@ -327,6 +455,7 @@ def _parser() -> argparse.ArgumentParser:
         default=DEFAULT_SESSION,
         help=f"conversation to continue or start (default: {DEFAULT_SESSION!r})",
     )
+    voice_cli.add_parser(commands, common)
 
     memory = commands.add_parser(
         "memory",
@@ -425,17 +554,24 @@ def _load_settings(config: Path | None) -> Settings:
 
 
 async def _chat(settings: Settings, session_id: str) -> int:
-    reader = StdinReader(sys.stdin.fileno())
-    reader.start()
+    interactive = sys.stdin.isatty() and sys.stdout.isatty()
+    read_line: ReadLine
+    if interactive:  # line editing and history (see `TerminalReader`)
+        read_line = TerminalReader(PROMPT, chat_history_path(settings)).readline
+    else:
+        reader = StdinReader(sys.stdin.fileno())
+        reader.start()
+        read_line = reader.readline
     loop = asyncio.get_running_loop()
     async with LucyApp(settings) as app:
         chat = ChatLoop(
             app,
             session_id,
-            read_line=reader.readline,
+            read_line=read_line,
             out=sys.stdout,
             err=sys.stderr,
             echo_input=not sys.stdin.isatty(),
+            reader_prompts=interactive,
         )
         # Ctrl-C is handled by the event loop, not as KeyboardInterrupt: the handler
         # runs on the loop between callbacks, so it can publish an Interrupt or wake
@@ -556,6 +692,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
         if done is not None:
             return done
+    if args.command == "voice" and args.list_devices:
+        return voice_cli.list_devices(sys.stdout, sys.stderr)
     try:
         settings = _load_settings(args.config)
     except ConfigError as exc:
@@ -566,6 +704,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return asyncio.run(_memory(settings, args))
         if args.command == "eval":
             return asyncio.run(_eval(settings, args))
+        if args.command == "voice":
+            return asyncio.run(voice_cli.run_voice(settings, args, out=sys.stdout, err=sys.stderr))
         return asyncio.run(_chat(settings, args.session))
     except KeyboardInterrupt:  # Ctrl-C while starting or stopping
         print(file=sys.stderr)

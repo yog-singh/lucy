@@ -53,9 +53,8 @@ from lucy.core.gateway import LLMGateway, Priority
 from lucy.core.jobs import Handler, Job, JobStatus, JobStore, utc_now
 from lucy.core.types import Message, Role
 from lucy.memory.decay import DecayPolicy, decay_inferred
-from lucy.memory.graph_store import DERIVED_META_PREFIX
 from lucy.memory.models import USER_ENTITY_ID, Entity, Origin, Statement, StatementKind
-from lucy.memory.ports import GraphStore
+from lucy.memory.ports import DERIVED_META_PREFIX, GraphStore
 from lucy.memory.profile import (
     ProfileWriter,
     complete_text,

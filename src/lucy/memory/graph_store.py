@@ -49,7 +49,7 @@ from lucy.core.events import AssistantMessage, ToolFinished, UserMessage, event_
 from lucy.core.jobs import utc_now
 from lucy.core.ports import Embedder
 from lucy.memory import fts
-from lucy.memory.db import MemoryStoreError, open_database
+from lucy.memory.db import open_database
 from lucy.memory.models import (
     DEFAULT_USER_NAME,
     USER_ENTITY_ID,
@@ -67,6 +67,11 @@ from lucy.memory.models import (
     StatementKind,
     VectorStatus,
 )
+from lucy.memory.ports import (  # defined with the interface; re-exported here
+    DERIVED_META_PREFIX,
+    GraphNotFoundError,
+    GraphStoreError,
+)
 from lucy.memory.vector_index import VectorIndex, load_vec, to_us
 
 log = logging.getLogger(__name__)
@@ -83,18 +88,6 @@ CONTENT_EPISODE_TYPES: Final[tuple[str, ...]] = (
 MIN_TRACE_NEEDLE: Final = 12
 #: Merge chains longer than this are treated as corrupt.
 _MAX_CHAIN: Final = 64
-#: `memory_meta` keys starting with this describe the graph's current contents
-#: (decay state, profile input hash, summary fingerprints, rejected merges); they
-#: are cleared by `reset_graph`. Other keys (e.g. when maintenance last ran) are kept.
-DERIVED_META_PREFIX: Final = "derived."
-
-
-class GraphStoreError(MemoryStoreError):
-    """A graph operation was invalid (bad reference, inconsistent dates, conflict...)."""
-
-
-class GraphNotFoundError(GraphStoreError, LookupError):
-    """A statement, entity or episode that a mutation refers to does not exist."""
 
 
 # --- Encoding -----------------------------------------------------------------

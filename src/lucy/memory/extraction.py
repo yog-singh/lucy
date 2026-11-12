@@ -38,10 +38,16 @@ Rules enforced in code, whatever the model says:
   wants to achieve or is working towards. A plan produces nothing.
 - A change is stored as the new state ("Tobias lives in Porto"), and that is
   what replaces the old state. A change event ("moved to Porto", "switched to
-  decaf", "left Hartley") is reconciled after the turn's other candidates, so
+  decaf", "left Hartley", "started cycling"; by its predicate, or a text such
+  as "has switched to") is reconciled after the turn's other candidates, so
   the new state supersedes the old one first, and it is dropped when another
   candidate of the turn has the same subject and object (it only repeats the
-  new state).
+  new state). Otherwise it is reconciled as a change (`change=True`): the
+  reconciler looks wider for the state it replaces and asks the model, in its
+  one call, for the new state in the form of the old one ("The user drinks
+  decaf coffee"), which is what is stored. The model often writes a change
+  event although the prompt asks for the new state, so this does not rely on
+  the prompt.
 
 A turn is ready once it has a `turn_ended` episode, or once a later content
 episode exists (a turn cut short by a crash); the newest turn is left alone
@@ -67,10 +73,10 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time
-from typing import Any, Final, Literal, Protocol, runtime_checkable
+from typing import Any, Final, Literal
 
 from pydantic import BaseModel
 
@@ -126,7 +132,12 @@ _PLAN: Final = re.compile(
 )
 #: A predicate describing a change event rather than a state.
 _CHANGE_EVENT: Final = re.compile(
-    r"^(?:has |have )?(?:moved|relocated|switched|changed|left)\b", re.I
+    r"^(?:has |have )?(?:moved|relocated|switched|swapped|changed|left|started|took up|joined)\b",
+    re.I,
+)
+#: A text describing a change event ("The user has switched to decaf").
+_CHANGE_TEXT: Final = re.compile(
+    r"\b(?:has |have )?(?:moved|relocated|switched|swapped|changed) (?:to|from|over|back)\b", re.I
 )
 #: "The user" as written before the user's name was known.
 _THE_USER: Final = re.compile(r"\b[Tt]he user\b")
@@ -134,16 +145,6 @@ _THE_USER: Final = re.compile(r"\b[Tt]he user\b")
 _UNLINKED_OK: Final = frozenset({"decision"})
 #: Statements whose text still says "The user" rewritten per turn at most.
 MAX_REWRITES: Final = 200
-
-
-@runtime_checkable
-class RewritesTexts(Protocol):
-    """A store that can reword statements (`SQLiteGraphStore.set_statement_texts`).
-
-    Not (yet) part of `GraphStore`; without it, "The user" texts stay as they are.
-    """
-
-    async def set_statement_texts(self, texts: Mapping[int, str]) -> int: ...
 
 
 def with_name(text: str, name: str) -> str:
@@ -301,7 +302,9 @@ def check_candidate(
 
 def is_change_event(candidate: ExtractedStatement) -> bool:
     """Whether `candidate` describes a change ("moved to Porto") rather than a state."""
-    return bool(_CHANGE_EVENT.match(_clean(candidate.predicate)))
+    return bool(
+        _CHANGE_EVENT.match(_clean(candidate.predicate)) or _CHANGE_TEXT.search(candidate.text)
+    )
 
 
 def _object_key(candidate: ExtractedStatement) -> str:
@@ -530,7 +533,9 @@ class Extractor:
                 report.dropped.append(Dropped(candidate, reason))
                 continue
             assert new is not None
-            result = await self.reconciler.reconcile(new, sources, pass_episodes=sources)
+            result = await self.reconciler.reconcile(
+                new, sources, pass_episodes=sources, change=is_change_event(candidate)
+            )
             log.info(
                 "turn %s: %s %r (%s)", report.key, result.outcome.value, new.text, result.reason
             )
@@ -634,8 +639,6 @@ class Extractor:
         Returns how many statements were reworded.
         """
         graph = self._graph
-        if not isinstance(graph, RewritesTexts):
-            return 0
         hits = await graph.keyword_statements("user", k=limit, include_invalid=True)
         texts = {
             h.statement.id: with_name(h.statement.text, name)

@@ -1,0 +1,179 @@
+{
+ "query": "current CEO of Apple",
+ "results": [
+  {
+   "title": "Tim Cook - Wikipedia",
+   "content": "\"Apple CEO Tim Cook took a chairman position at one of China's top business schools\". Business Insider. Archived from the original on November 15, 2019.",
+   "url": "https://en.wikipedia.org/wiki/Tim_Cook",
+   "engine": "google cse",
+   "engines": [
+    "google cse"
+   ],
+   "positions": [
+    1
+   ],
+   "score": 1.0,
+   "publishedDate": null,
+   "category": "general",
+   "template": "default.html"
+  },
+  {
+   "title": "John Ternus - Wikipedia",
+   "content": "John Patrick Ternus is an American engineer and business executive who has been the chief executive officer (CEO) of Apple since September 1, 2026.",
+   "url": "https://en.wikipedia.org/wiki/John_Ternus",
+   "engine": "google cse",
+   "engines": [
+    "google cse"
+   ],
+   "positions": [
+    9
+   ],
+   "score": 0.1111111111111111,
+   "publishedDate": null,
+   "category": "general",
+   "template": "default.html"
+  },
+  {
+   "title": "John Ternus - Apple Leadership",
+   "content": "John Ternus is the CEO of Apple and serves on its board of directors. John joined Apple's product design team in 2001 and became a vice president of ...",
+   "url": "https://www.apple.com/in/leadership/john-ternus/",
+   "engine": "google cse",
+   "engines": [
+    "google cse"
+   ],
+   "positions": [
+    15
+   ],
+   "score": 0.06666666666666667,
+   "publishedDate": null,
+   "category": "general",
+   "template": "default.html"
+  },
+  {
+   "title": "Tim Cook has been CEO of Apple since 2011. Since then ... - Reddit",
+   "content": "9 Sept 2022 ... Since then, Apples market cap has went from 340 billion to 2.52 trillion. What do you think of him as the CEO of Apple? Discussion.",
+   "url": "https://www.reddit.com/r/apple/comments/xa0vg9/tim_cook_has_been_ceo_of_apple_since_2011_since/",
+   "engine": "google cse",
+   "engines": [
+    "google cse"
+   ],
+   "positions": [
+    17
+   ],
+   "score": 0.058823529411764705,
+   "publishedDate": null,
+   "category": "general",
+   "template": "default.html"
+  },
+  {
+   "title": "Apple Inc. - Wikipedia",
+   "content": "In 1993, John Sculley was replaced as CEO by Michael Spindler. The board directed Spindler to pursue efforts to sell or merge Apple with another company.",
+   "url": "https://en.wikipedia.org/wiki/Apple_Inc.",
+   "engine": "google cse",
+   "engines": [
+    "google cse"
+   ],
+   "positions": [
+    18
+   ],
+   "score": 0.05555555555555555,
+   "publishedDate": null,
+   "category": "general",
+   "template": "default.html"
+  },
+  {
+   "title": "Tim Cook - Apple Leadership",
+   "content": "Tim Cook has been a director since 2011 and serves as the executive chair of the board. He joined Apple in 1998 and served as the company's CEO from 2011 to ...",
+   "url": "https://www.apple.com/in/leadership/tim-cook/",
+   "engine": "google cse",
+   "engines": [
+    "google cse"
+   ],
+   "positions": [
+    2
+   ],
+   "score": 0.5,
+   "publishedDate": null,
+   "category": "general",
+   "template": "default.html"
+  },
+  {
+   "title": "Tim Cook to become Apple Executive Chairman John Ternus to ...",
+   "content": "20 Apr 2026 ... John Ternus to become Apple CEO ... Tim Cook and John Ternus at Apple Park. CUPERTINO, CALIFORNIA ...",
+   "url": "https://www.apple.com/in/newsroom/2026/04/tim-cook-to-become-apple-executive-chairman-john-ternus-to-become-apple-ceo/",
+   "engine": "google cse",
+   "engines": [
+    "google cse"
+   ],
+   "positions": [
+    3
+   ],
+   "score": 0.3333333333333333,
+   "publishedDate": null,
+   "category": "general",
+   "template": "default.html"
+  },
+  {
+   "title": "Apple Leadership",
+   "content": "Board of Directors · Tim Cook. Executive Chair · Arthur Levinson. Lead Independent Director · Wanda Austin. Former President and CEO The Aerospace Corporation ...",
+   "url": "https://www.apple.com/in/leadership/",
+   "engine": "google cse",
+   "engines": [
+    "google cse"
+   ],
+   "positions": [
+    4
+   ],
+   "score": 0.25,
+   "publishedDate": null,
+   "category": "general",
+   "template": "default.html"
+  },
+  {
+   "title": "Tim Cook | Biography, Apple CEO, & Business Executive - Britannica",
+   "content": "Tim Cook, Apple CEO, wearing a dark suit jacket, light blue dress shirt · Tim Cook succeeded Steve Jobs as Apple CEO in 2011. © Arturo Holmes—WireImage/Getty ...",
+   "url": "https://www.britannica.com/money/Tim-Cook",
+   "engine": "google cse",
+   "engines": [
+    "google cse"
+   ],
+   "positions": [
+    5
+   ],
+   "score": 0.2,
+   "publishedDate": null,
+   "category": "general",
+   "template": "default.html"
+  },
+  {
+   "title": "Tim Cook (@tim_cook) / X",
+   "content": "There are people who leave a mark on the world, and then there are people who change it entirely. Steve changed the world and so many lives in the process.",
+   "url": "https://x.com/tim_cook?lang=en",
+   "engine": "google cse",
+   "engines": [
+    "google cse"
+   ],
+   "positions": [
+    6
+   ],
+   "score": 0.16666666666666666,
+   "publishedDate": null,
+   "category": "general",
+   "template": "default.html"
+  }
+ ],
+ "answers": [],
+ "corrections": [],
+ "infoboxes": [],
+ "suggestions": [],
+ "unresponsive_engines": [
+  [
+   "brave",
+   "too many requests"
+  ],
+  [
+   "duckduckgo",
+   "CAPTCHA"
+  ]
+ ]
+}

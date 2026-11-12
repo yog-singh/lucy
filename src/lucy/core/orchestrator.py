@@ -26,6 +26,7 @@ from lucy.core.events import (
     AssistantMessage,
     Event,
     Interrupt,
+    PlaybackInterrupted,
     SentenceReady,
     TextDelta,
     ToolFinished,
@@ -99,6 +100,10 @@ class _Turn:
 class Orchestrator:
     """Consumes `UserMessage` and `Interrupt` events from the bus and runs turns.
 
+    It also appends every `PlaybackInterrupted` it receives (published by a
+    voice client, ADR 0016) to the episode log, and does nothing else with it:
+    the event only changes how that turn is rebuilt from the log later.
+
     Readiness: the bus subscription is created in `__init__`, not in `run`, so
     every inbound event published after the orchestrator is constructed is
     queued and handled once `run` is scheduled. Callers construct it, start
@@ -145,7 +150,7 @@ class Orchestrator:
         self._history_limit = history_limit
         self._sessions: dict[str, _Session] = {}
         self._running = False
-        self._subscription = bus.subscribe(UserMessage, Interrupt)
+        self._subscription = bus.subscribe(UserMessage, Interrupt, PlaybackInterrupted)
 
     async def run(self) -> None:
         """Handle inbound events until the bus is closed, then stop all turns and return."""
@@ -154,7 +159,10 @@ class Orchestrator:
         self._running = True
         try:
             async for event in self._subscription:
-                self._dispatch(event)
+                if isinstance(event, PlaybackInterrupted):
+                    await self._record_playback(event)
+                else:
+                    self._dispatch(event)
         finally:
             self._subscription.close()
             await self._shutdown()
@@ -171,6 +179,13 @@ class Orchestrator:
             session = self._sessions.get(event.session_id)
             if session is not None and session.turn is not None and session.turn_started:
                 session.turn.cancel()
+
+    async def _record_playback(self, event: PlaybackInterrupted) -> None:
+        """Persist what a voice client reports was actually spoken; failures are logged."""
+        try:
+            await self._memory.append_episode(event)
+        except Exception:
+            logger.exception("could not record playback interruption of turn %s", event.turn_id)
 
     async def _serve(self, session_id: str, session: _Session) -> None:
         """Run the session's queued turns one at a time, then retire the session."""

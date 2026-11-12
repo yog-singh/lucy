@@ -52,6 +52,14 @@ class MemoryPolicy(BaseModel):
     and below the weakest contradiction seen (0.85): a missed contradiction
     leaves two conflicting current beliefs, while a needless model call only
     costs time."""
+    change_similarity_floor: float = Field(0.76, ge=-1.0, le=1.0)
+    """For a candidate that describes a change ("switched to decaf"), current
+    statements of the same subject at least this similar are also shown to the
+    model, which says which one the change replaces. A change event is worded
+    unlike the state it replaces: 0.81 to 0.88 against it ("switched to decaf"
+    / "drinks a strong dark roast coffee every morning": 0.81; "started cycling
+    to work" / "drives to work": 0.86), against 0.71 to 0.80 for most
+    unrelated statements about the same person."""
     near_identical_similarity: float = Field(0.97, ge=-1.0, le=1.0)
     """At or above this (with the same object), two statement texts say the same
     thing: a candidate near-identical to a statement that already has the same
@@ -77,6 +85,8 @@ class MemoryPolicy(BaseModel):
             raise ValueError("entity_ambiguous_similarity must not exceed entity_match_similarity")
         if self.statement_similarity_floor > self.near_identical_similarity:
             raise ValueError("statement_similarity_floor must not exceed near_identical_similarity")
+        if self.change_similarity_floor > self.statement_similarity_floor:
+            raise ValueError("change_similarity_floor must not exceed statement_similarity_floor")
         return self
 
     def initial_confidence(self, origin: Origin | str) -> float:

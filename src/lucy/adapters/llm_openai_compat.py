@@ -17,6 +17,18 @@ against the schema, `gemma4:12b-mlx` can emit whitespace (which the grammar
 always allows) indefinitely, and the stream never ends. With a response schema,
 a run of more than `MAX_SCHEMA_WHITESPACE_RUN` whitespace characters ends the
 response with `FinishReason.LENGTH`, so the caller sees truncated output.
+
+Another is guarded against on request (`hidden_loop_repeats`): with thinking
+off and tools offered, `gemma4:12b-mlx` on Ollama 0.40.16 sometimes repeats an
+empty thought block (`<|channel>thought\n<channel|>`, four tokens) without end.
+Ollama strips those tokens, so the stream carries nothing until the read
+timeout. With `logprobs` requested, every generated token still arrives in a
+chunk (with empty `content`), which makes the loop visible within half a
+second: when the tokens before any visible output are one short block repeated
+`hidden_loop_repeats` times, the response is ended with `FinishReason.LENGTH`
+and no output, so the gateway can retry it on a fallback role. Measured: normal
+replies start with at most two empty blocks; looping ones repeated it over 100
+times in 15 s and never recovered.
 """
 
 from __future__ import annotations
@@ -41,6 +53,9 @@ OLLAMA_BASE_URL: Final = "http://localhost:11434/v1"
 
 MAX_SCHEMA_WHITESPACE_RUN: Final = 256
 """Consecutive whitespace characters after which a schema-constrained response is cut off."""
+
+MAX_LOOP_PERIOD: Final = 8
+"""Longest block of hidden tokens whose repetition `hidden_loop_repeats` detects."""
 
 _FINISH_REASONS: Final[dict[str, FinishReason]] = {
     "stop": FinishReason.STOP,
@@ -122,6 +137,44 @@ class _ThinkFilter:
         if text:
             self._emitted = True
         return text
+
+
+# --- Hidden-loop detection ----------------------------------------------------
+
+
+class _HiddenLoopDetector:
+    """Detects a response whose hidden tokens (before any visible output) are one short
+    block repeated over and over.
+
+    Fed the tokens reported in `logprobs` while nothing visible has been produced.
+    `add` returns True once all tokens so far are a block of at most
+    `MAX_LOOP_PERIOD` tokens repeated `repeats` times. Once the tokens are no such
+    repetition (a tool call starting, say) it never fires.
+    """
+
+    def __init__(self, repeats: int) -> None:
+        self._repeats = repeats
+        self._tokens: list[str] = []
+        self._periods = set(range(1, MAX_LOOP_PERIOD + 1))
+
+    def add(self, token: str) -> bool:
+        if not self._periods:
+            return False
+        self._tokens.append(token)
+        size = len(self._tokens)
+        self._periods = {
+            p for p in self._periods if size <= p or self._tokens[size - 1 - p] == token
+        }
+        return any(size >= p * self._repeats for p in self._periods)
+
+
+def _logprob_tokens(choice: dict[str, Any]) -> list[str]:
+    """The tokens a chunk's `logprobs` reports (empty without logprobs)."""
+    logprobs = choice.get("logprobs")
+    entries = logprobs.get("content") if isinstance(logprobs, dict) else None
+    if not isinstance(entries, list):
+        return []
+    return [e["token"] for e in entries if isinstance(e, dict) and isinstance(e.get("token"), str)]
 
 
 # --- Tool-call assembly -------------------------------------------------------
@@ -281,7 +334,11 @@ class OpenAICompatLLM:
     `{"reasoning_effort": "none"}` to switch thinking off on Ollama.
     `json_schema` declares that the server enforces `response_format` JSON
     schemas; it is off by default here because many servers silently ignore
-    the parameter. `transport` is for tests.
+    the parameter. `hidden_loop_repeats` (off by default) requests `logprobs`
+    and ends a response with no output when its tokens before any visible
+    output are one short block repeated that many times (see the module
+    docstring); use it only with thinking off, since reasoning tokens are
+    hidden too. `transport` is for tests.
     """
 
     server_name: str = "the model server"
@@ -297,10 +354,14 @@ class OpenAICompatLLM:
         json_schema: bool = False,
         temperature: float | None = None,
         timeout: float = 120,
+        hidden_loop_repeats: int | None = None,
         extra: dict[str, Any] | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
+        if hidden_loop_repeats is not None and hidden_loop_repeats < 2:
+            raise ValueError("hidden_loop_repeats must be at least 2")
         self.model = model
+        self._hidden_loop_repeats = hidden_loop_repeats
         self.base_url = base_url.rstrip("/")
         self.capabilities = LLMCaps(
             native_tools=native_tools,
@@ -340,6 +401,8 @@ class OpenAICompatLLM:
             body["response_format"] = _response_format(response_schema)
         if self._temperature is not None:
             body["temperature"] = self._temperature
+        if self._hidden_loop_repeats is not None:
+            body["logprobs"] = True
         body.update(self._extra)
         return body
 
@@ -394,6 +457,9 @@ class OpenAICompatLLM:
         whitespace_run = 0
         think = _ThinkFilter()
         calls = _ToolCallAssembler()
+        repeats = self._hidden_loop_repeats
+        loop = _HiddenLoopDetector(repeats) if repeats is not None else None
+        visible = False
         finish: str | None = None
         done = False
         async for data in _sse_data(response):
@@ -419,6 +485,7 @@ class OpenAICompatLLM:
                 if isinstance(content, str) and content:
                     text = think.feed(content)
                     if text:
+                        visible = True
                         yield LLMChunk(text=text)
                         if guard_whitespace:
                             stripped = text.rstrip()
@@ -434,7 +501,18 @@ class OpenAICompatLLM:
                                 yield LLMChunk(finish_reason=FinishReason.LENGTH)
                                 return
                 for call_delta in delta.get("tool_calls") or []:
+                    visible = True
                     calls.add(call_delta)
+                if loop is not None and not visible:
+                    if any(loop.add(token) for token in _logprob_tokens(choice)):
+                        logger.warning(
+                            "model %r repeated the same hidden tokens %d times without any "
+                            "output; ending the response",
+                            self.model,
+                            repeats,
+                        )
+                        yield LLMChunk(finish_reason=FinishReason.LENGTH)
+                        return
                 if choice.get("finish_reason"):
                     finish = choice["finish_reason"]
         if not done and finish is None:

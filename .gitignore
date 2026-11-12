@@ -11,5 +11,5 @@ dist/
 .ruff_cache/
 
 # Local data and config
-data/
+/data/
 lucy.toml

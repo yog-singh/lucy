@@ -69,6 +69,21 @@ class Interrupt(Event):
     type: Literal["interrupt"] = "interrupt"
 
 
+class PlaybackInterrupted(Event):
+    """Spoken playback of a turn's reply was cut short (ADR 0016).
+
+    Published by a voice client when the user stops Lucy while she is speaking
+    (or thinking). `spoken_text` is the reply text actually heard: whole
+    sentences played plus an approximate part of the sentence in progress, for
+    the turn's final LLM step. The orchestrator only persists it; rebuilding the
+    conversation replaces that turn's reply with `spoken_text`
+    (`lucy.core.history.events_to_messages`).
+    """
+
+    type: Literal["playback_interrupted"] = "playback_interrupted"
+    spoken_text: str
+
+
 class TimerFired(Event):
     """A scheduled timer elapsed; lets Lucy start a turn on her own."""
 
@@ -138,7 +153,13 @@ class TurnEnded(Event):
     error: str | None = None
 
 
-INBOUND_EVENTS: tuple[type[Event], ...] = (UserMessage, Interrupt, TimerFired, ClientConnected)
+INBOUND_EVENTS: tuple[type[Event], ...] = (
+    UserMessage,
+    Interrupt,
+    PlaybackInterrupted,
+    TimerFired,
+    ClientConnected,
+)
 OUTBOUND_EVENTS: tuple[type[Event], ...] = (
     TextDelta,
     SentenceReady,
@@ -151,6 +172,7 @@ OUTBOUND_EVENTS: tuple[type[Event], ...] = (
 AnyEvent = Annotated[
     UserMessage
     | Interrupt
+    | PlaybackInterrupted
     | TimerFired
     | ClientConnected
     | TextDelta

@@ -15,10 +15,9 @@ from pathlib import Path
 import aiosqlite
 
 from lucy.memory.migrations import MIGRATIONS
+from lucy.memory.ports import MemoryStoreError  # defined with the interface; re-exported
 
-
-class MemoryStoreError(RuntimeError):
-    """The memory store cannot do what was asked (duplicate event, bad schema, ...)."""
+__all__ = ["MemoryStoreError", "apply_migrations", "open_database"]
 
 
 async def _user_version(conn: aiosqlite.Connection) -> int:

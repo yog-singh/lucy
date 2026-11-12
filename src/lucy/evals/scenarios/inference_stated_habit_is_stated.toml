@@ -1,0 +1,27 @@
+category = "inference"
+description = "A habit the user states outright is stored as a stated habit at once, not left for reflection to infer."
+
+# The counterpart of `inference_one_off_vs_pattern`: there the habit must be
+# inferred from a pattern; here one message says it is a regular thing.
+
+[[steps]]
+do = "history"
+messages = [
+  { day = 1, time = "12:00", text = "What's a good name for a sourdough starter?" },
+  { day = 5, time = "10:15", text = "Called my sister Anika like every Saturday morning, she's moving flats next month." },
+  { day = 8, time = "09:00", text = "How do I unclog a bathroom sink?" },
+]
+
+[[steps]]
+do = "jobs"
+
+[[steps]]
+check = "statement"
+any = ["Anika", "sister"]
+kind = "habit"
+origin = "stated"
+
+[[steps]]
+check = "answer"
+question = "When do I usually call my sister?"
+any = ["Saturday", "Saturdays"]

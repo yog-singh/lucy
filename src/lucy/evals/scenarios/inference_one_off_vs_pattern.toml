@@ -1,20 +1,24 @@
 category = "inference"
-description = "A weekly Sunday call becomes a habit; a one-off concert does not."
+description = "Calls with Mum reported on four Sundays become an inferred habit; a one-off concert does not."
+
+# Each message reports one call and never says it is a regular thing or which
+# day it is, so the habit is visible only across messages (they all fall on a
+# Sunday). A habit stated outright is tested by `inference_stated_habit_is_stated`.
 
 [[steps]]
 do = "history"
 messages = [
   { day = 1, time = "12:00", text = "What's a good name for a sourdough starter?" },
-  { day = 6, time = "18:00", text = "Just finished my Sunday call with Mum, she's doing well." },
+  { day = 6, time = "18:00", text = "Just got off the phone with Mum, she's doing well." },
   { day = 8, time = "09:00", text = "How do I unclog a bathroom sink?" },
   { day = 11, time = "23:00", text = "Went to a jazz concert at the Blue Lantern tonight, amazing sax player." },
-  { day = 13, time = "18:15", text = "Called Mum like every Sunday, she's planning her garden." },
+  { day = 13, time = "18:15", text = "Called Mum earlier, she's planning her garden." },
   { day = 15, time = "10:00", text = "What's the best way to store fresh basil?" },
   { day = 17, time = "16:00", text = "Explain how a heat pump works, briefly." },
-  { day = 20, time = "18:05", text = "Sunday phone call with Mum done, she says hi." },
+  { day = 20, time = "18:05", text = "Phone call with Mum done, she says hi." },
   { day = 22, time = "13:00", text = "How long does it take to fly from London to Lisbon?" },
   { day = 25, time = "09:30", text = "Any tips for falling asleep faster?" },
-  { day = 27, time = "18:10", text = "Long chat with Mum on the phone tonight, our Sunday ritual." },
+  { day = 27, time = "18:10", text = "Long chat with Mum on the phone tonight." },
   { day = 27, time = "21:00", text = "Thanks, good night." },
 ]
 

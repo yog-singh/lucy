@@ -14,6 +14,7 @@ from tests.graph_support import log
 #: Thresholds that suit `HashingEmbedder` (bag-of-words cosine), not a real model.
 TEST_POLICY_VALUES: dict[str, float] = {
     "statement_similarity_floor": 0.5,
+    "change_similarity_floor": 0.3,
     "near_identical_similarity": 0.95,
     "entity_match_similarity": 0.9,
     "entity_ambiguous_similarity": 0.5,

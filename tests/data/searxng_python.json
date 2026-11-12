@@ -1,0 +1,175 @@
+{
+ "query": "Python",
+ "results": [
+  {
+   "title": "Python",
+   "content": "Topics referred to by the same term",
+   "url": "https://en.wikipedia.org/wiki/Python",
+   "engine": "wikipedia",
+   "engines": [
+    "wikipedia"
+   ],
+   "positions": [
+    1
+   ],
+   "score": 1.0,
+   "publishedDate": null,
+   "category": "general",
+   "template": "default.html"
+  },
+  {
+   "title": "Python (programming language) - Wikipedia",
+   "content": "Python was conceived in the late 1980s by Guido van Rossum at Centrum Wiskunde & Informatica (CWI) in the Netherlands. ... It was designed as a successor to the ...",
+   "url": "https://en.wikipedia.org/wiki/Python_(programming_language)",
+   "engine": "google cse",
+   "engines": [
+    "google cse"
+   ],
+   "positions": [
+    4
+   ],
+   "score": 0.25,
+   "publishedDate": null,
+   "category": "general",
+   "template": "default.html"
+  },
+  {
+   "title": "Online Python - IDE, Editor, Compiler, Interpreter",
+   "content": "Online Python IDE. Build, run, and share Python code online for free with the help of online-integrated python's development environment (IDE). It is one of the ...",
+   "url": "https://www.online-python.com/",
+   "engine": "google cse",
+   "engines": [
+    "google cse"
+   ],
+   "positions": [
+    8
+   ],
+   "score": 0.125,
+   "publishedDate": null,
+   "category": "general",
+   "template": "default.html"
+  },
+  {
+   "title": "What is Python? - Python Language Explained - AWS",
+   "content": "What is Python? Python is a programming language that is widely used in web applications, software development, data science, and machine learning (ML).",
+   "url": "https://aws.amazon.com/what-is/python/",
+   "engine": "google cse",
+   "engines": [
+    "google cse"
+   ],
+   "positions": [
+    14
+   ],
+   "score": 0.07142857142857142,
+   "publishedDate": null,
+   "category": "general",
+   "template": "default.html"
+  },
+  {
+   "title": "Online Python courses and programs - edX",
+   "content": "1. Explore the fundamentals · Overview of Python and what it's used for · How to set up Python and an Integrated Development Environment (IDE) · Basic syntax, ...",
+   "url": "https://www.edx.org/learn/python",
+   "engine": "google cse",
+   "engines": [
+    "google cse"
+   ],
+   "positions": [
+    19
+   ],
+   "score": 0.05263157894736842,
+   "publishedDate": null,
+   "category": "general",
+   "template": "default.html"
+  },
+  {
+   "title": "Welcome to Python.org",
+   "content": "Functions Defined · Get Started. Whether you're new to programming or an experienced developer, it's easy to learn and use Python. · Download. Python source ...",
+   "url": "https://www.python.org/",
+   "engine": "google cse",
+   "engines": [
+    "google cse"
+   ],
+   "positions": [
+    1
+   ],
+   "score": 1.0,
+   "publishedDate": null,
+   "category": "general",
+   "template": "default.html"
+  }
+ ],
+ "answers": [],
+ "corrections": [],
+ "infoboxes": [
+  {
+   "infobox": "Python",
+   "id": "https://en.wikipedia.org/wiki/Python_(programming_language)",
+   "content": "general-purpose programming language",
+   "urls": [
+    {
+     "title": "Official website",
+     "url": "https://www.python.org/",
+     "official": true
+    },
+    {
+     "title": "Wikipedia (en)",
+     "url": "https://en.wikipedia.org/wiki/Python_(programming_language)"
+    },
+    {
+     "title": "Source code repository url",
+     "url": "https://www.python.org/downloads/source/"
+    },
+    {
+     "title": "Lemmy",
+     "url": "https://programming.dev/c/python"
+    },
+    {
+     "title": "Wikidata",
+     "url": "http://www.wikidata.org/entity/Q28865"
+    }
+   ],
+   "attributes": [
+    {
+     "label": "Inception",
+     "value": "Wednesday, February 20, 1991",
+     "entity": "P571"
+    },
+    {
+     "label": "Developer",
+     "value": "Python Software Foundation, Guido van Rossum",
+     "entity": "P178"
+    },
+    {
+     "label": "Copyright license",
+     "value": "Python Software Foundation License",
+     "entity": "P275"
+    },
+    {
+     "label": "Programmed in",
+     "value": "C, Python",
+     "entity": "P277"
+    },
+    {
+     "label": "Software version identifier",
+     "value": "3.15.2",
+     "entity": "P348"
+    }
+   ],
+   "engine": "wikidata",
+   "engines": [
+    "wikidata"
+   ]
+  }
+ ],
+ "suggestions": [],
+ "unresponsive_engines": [
+  [
+   "brave",
+   "Suspended: too many requests"
+  ],
+  [
+   "duckduckgo",
+   "CAPTCHA"
+  ]
+ ]
+}

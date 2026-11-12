@@ -132,6 +132,16 @@ class AudioChunk(_Frozen):
     sample_rate: int
     channels: int = 1
 
+    @property
+    def frames(self) -> int:
+        """Number of sample frames (samples per channel); a trailing partial frame is ignored."""
+        return len(self.data) // (SAMPLE_WIDTH_BYTES * self.channels)
+
+    @property
+    def duration(self) -> float:
+        """Length in seconds."""
+        return self.frames / self.sample_rate if self.sample_rate > 0 else 0.0
+
 
 class Transcript(_Frozen):
     """The text recognised from an utterance."""

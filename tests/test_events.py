@@ -11,6 +11,7 @@ from lucy.core.events import (
     ClientConnected,
     Event,
     Interrupt,
+    PlaybackInterrupted,
     SentenceReady,
     TextDelta,
     TimerFired,
@@ -26,6 +27,7 @@ from lucy.core.types import ToolCall, ToolResult
 SAMPLES: list[Event] = [
     UserMessage(session_id="s", text="hello", source="voice"),
     Interrupt(session_id="s", turn_id="t1"),
+    PlaybackInterrupted(session_id="s", turn_id="t1", spoken_text="Once upon a"),
     TimerFired(session_id="s", name="reminder", payload={"what": "tea", "n": [1, 2]}),
     ClientConnected(session_id="s", client_id="cli"),
     TextDelta(session_id="s", turn_id="t1", text="Hel"),

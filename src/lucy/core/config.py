@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import tomllib
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+
+from lucy.core.context import ContextLayout
 
 
 class ConfigError(ValueError):
@@ -31,15 +33,39 @@ class AdapterConfig(BaseModel):
     adapter: str = Field(min_length=1)
     options: dict[str, Any] = Field(default_factory=dict)
 
+    own_keys: ClassVar[frozenset[str]] = frozenset({"adapter"})
+    """Keys that are fields of this model; every other key goes into `options`."""
+
     @model_validator(mode="before")
     @classmethod
     def _collect_options(cls, data: Any) -> Any:
         if not isinstance(data, dict):
             return data
-        if set(data) <= {"adapter", "options"} and isinstance(data.get("options", {}), dict):
+        if set(data) <= cls.own_keys | {"options"} and isinstance(data.get("options", {}), dict):
             return data  # already in canonical form
-        options = {key: value for key, value in data.items() if key != "adapter"}
-        return {"adapter": data.get("adapter"), "options": options}
+        options = {key: value for key, value in data.items() if key not in cls.own_keys}
+        own = {key: data[key] for key in cls.own_keys if key in data}
+        return {"adapter": data.get("adapter"), **own, "options": options}
+
+
+class LLMRoleConfig(AdapterConfig):
+    """An LLM role: its adapter config plus how the gateway routes its FOREGROUND streams.
+
+    `fallback` names another role that serves a FOREGROUND stream once when this
+    role's stream ends, or produces nothing for `first_output_timeout` seconds,
+    without any text or tool call. `after_tool` names a role that serves this
+    role's FOREGROUND streams whose last message is a tool result (the answer
+    step after a lookup). See `LLMGateway.stream`. None of these keys is passed
+    to the adapter.
+    """
+
+    fallback: str | None = Field(default=None, min_length=1)
+    first_output_timeout: float | None = Field(default=None, gt=0)
+    after_tool: str | None = Field(default=None, min_length=1)
+
+    own_keys: ClassVar[frozenset[str]] = frozenset(
+        {"adapter", "fallback", "first_output_timeout", "after_tool"}
+    )
 
 
 class LLMSettings(BaseModel):
@@ -47,13 +73,38 @@ class LLMSettings(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    roles: dict[str, AdapterConfig]
+    roles: dict[str, LLMRoleConfig]
+
+    @field_validator("roles", mode="before")
+    @classmethod
+    def _accept_adapter_configs(cls, roles: Any) -> Any:
+        # A plain AdapterConfig (as built in Python) is a role without a fallback.
+        if not isinstance(roles, dict):
+            return roles
+        return {
+            name: config.model_dump()
+            if isinstance(config, AdapterConfig) and not isinstance(config, LLMRoleConfig)
+            else config
+            for name, config in roles.items()
+        }
 
     @field_validator("roles")
     @classmethod
-    def _require_chat(cls, roles: dict[str, AdapterConfig]) -> dict[str, AdapterConfig]:
+    def _require_chat(cls, roles: dict[str, LLMRoleConfig]) -> dict[str, LLMRoleConfig]:
         if "chat" not in roles:
             raise ValueError("[llm.roles] must define a 'chat' role")
+        for name, config in roles.items():
+            for key in ("fallback", "after_tool"):
+                other = getattr(config, key)
+                if other is None:
+                    continue
+                if other == name:
+                    raise ValueError(f"role {name!r} cannot be its own {key}")
+                if other not in roles:
+                    raise ValueError(
+                        f"role {name!r} has {key} {other!r}, which is not a "
+                        f"configured role; configured roles: {', '.join(sorted(roles))}"
+                    )
         return roles
 
 
@@ -106,6 +157,143 @@ class RetrievalSettings(BaseModel):
     """At most this many retrieved statements are given to a turn."""
 
 
+class _ToolOptions(BaseModel):
+    """Options every internet tool has."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    max_chars: int = Field(default=6000, ge=200)
+    """Longest result handed to the model, in characters (results go straight into its context)."""
+    timeout: float = Field(default=10.0, gt=0)
+    """Seconds one tool call may take in total, including retries and redirects."""
+
+
+class WikipediaSettings(_ToolOptions):
+    """The `wikipedia` tool: search Wikipedia and return the best article's introduction."""
+
+    language: str = Field(default="en", pattern=r"^[a-z][a-z0-9-]{1,15}$")
+    """Wikipedia language edition, as in its address (`en` for en.wikipedia.org)."""
+    other_matches: int = Field(default=4, ge=0, le=10)
+    """Titles of further matching articles listed after the best one."""
+
+
+class WebSearchSettings(_ToolOptions):
+    """The `web_search` tool: query a SearXNG instance's JSON API."""
+
+    searxng_url: str | None = Field(default=None, pattern=r"^https?://[^\s/]+")
+    """Base address of the SearXNG instance, e.g. "http://127.0.0.1:8890". Required when enabled."""
+    max_results: int = Field(default=5, ge=1, le=20)
+    """Results returned to the model."""
+
+
+class FetchPageSettings(_ToolOptions):
+    """The `fetch_page` tool: fetch a public web page and return its readable text."""
+
+    max_bytes: int = Field(default=2_000_000, ge=1024)
+    """Most bytes of a response body read (decompressed); the rest is not downloaded."""
+    max_redirects: int = Field(default=5, ge=0, le=20)
+    """Redirects followed, each one checked like the first address."""
+    allow_private_hosts: list[str] = Field(default_factory=list)
+    """Hosts on the local network the tool may fetch despite the public-address rule:
+    host names (exact match), IP addresses or networks such as "192.168.1.0/24".
+    Empty by default; add for example a local Home Assistant only when needed."""
+
+
+class WeatherSettings(_ToolOptions):
+    """The `weather` tool: current conditions and a daily forecast from Open-Meteo."""
+
+    units: Literal["metric", "imperial"] = "metric"
+    """"metric" (°C, km/h, mm) or "imperial" (°F, mph, inches)."""
+
+
+class TimeSettings(BaseModel):
+    """The `time` tool: the date and time in a named place, from the system's time-zone
+    database. It has no options and makes no network request."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+
+class ToolsSettings(BaseModel):
+    """Which tools the chat model may use, and each tool's options.
+
+    Nothing is enabled by default, so Lucy makes no network requests unless the
+    user opts in (`time` is the one tool that needs no network). Each name in
+    `enabled` must be one of the option tables below.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    enabled: list[str] = Field(default_factory=list)
+    wikipedia: WikipediaSettings = Field(default_factory=WikipediaSettings)
+    web_search: WebSearchSettings = Field(default_factory=WebSearchSettings)
+    fetch_page: FetchPageSettings = Field(default_factory=FetchPageSettings)
+    time: TimeSettings = Field(default_factory=TimeSettings)
+    weather: WeatherSettings = Field(default_factory=WeatherSettings)
+
+    @classmethod
+    def known_tools(cls) -> list[str]:
+        """The tool names `enabled` accepts."""
+        return [name for name in cls.model_fields if name != "enabled"]
+
+    @model_validator(mode="after")
+    def _check_enabled(self) -> Self:
+        known = self.known_tools()
+        unknown = [name for name in self.enabled if name not in known]
+        if unknown:
+            raise ValueError(
+                f"[tools] enabled lists unknown tool(s) {', '.join(map(repr, unknown))}; "
+                f"known tools: {', '.join(known)}"
+            )
+        duplicates = sorted({name for name in self.enabled if self.enabled.count(name) > 1})
+        if duplicates:
+            raise ValueError(f"[tools] enabled lists {', '.join(map(repr, duplicates))} twice")
+        if "web_search" in self.enabled and not self.web_search.searxng_url:
+            raise ValueError(
+                "web_search is enabled but [tools.web_search] has no searxng_url "
+                '(e.g. searxng_url = "http://127.0.0.1:8890"; see deploy/searxng/README.md)'
+            )
+        return self
+
+
+class VoiceSettings(BaseModel):
+    """`lucy voice`: listening, endpointing and audio devices (see docs/voice.md).
+
+    The speech models themselves are the `[stt]` and `[tts]` sections.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    endpoint_silence_ms: int = Field(default=600, ge=100, le=5000)
+    """Silence after speech that ends the user's turn."""
+    min_speech_ms: int = Field(default=160, ge=32, le=2000)
+    """Continuous speech needed before a turn starts (so clicks and knocks do not)."""
+    preroll_ms: int = Field(default=300, ge=0, le=2000)
+    """Audio kept from before speech was detected, so the first syllable is not cut off."""
+    max_utterance_s: float = Field(default=30.0, gt=0, le=300)
+    """Longest single utterance; a longer one is ended and sent as it is."""
+    tail_ms: int = Field(default=300, ge=0, le=5000)
+    """How long the microphone stays ignored after Lucy stops speaking."""
+    vad_threshold: float = Field(default=0.5, gt=0, lt=1)
+    """Speech probability (Silero VAD) from which a frame counts as speech."""
+    input_device: int | str | None = None
+    """Microphone: a device number or (part of) a name from `lucy voice --list-devices`;
+    None is the system default."""
+    output_device: int | str | None = None
+    """Speaker, as for `input_device`."""
+
+
+class ContextSettings(BaseModel):
+    """How the chat prompt is arranged (see `lucy.core.context`)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    layout: ContextLayout = "system"
+    """`"system"`: the date and retrieved memories in the system message, before the
+    history. `"stable_prefix"`: only what rarely changes before the history, and the
+    date and memories with the latest user message, so each turn's prompt extends
+    the previous one and the model server can reuse its cache."""
+
+
 class Settings(BaseModel):
     """All of Lucy's settings. Only `llm` is required; other sections are optional."""
 
@@ -118,6 +306,9 @@ class Settings(BaseModel):
     memory: AdapterConfig | None = None
     learning: LearningSettings = Field(default_factory=LearningSettings)
     retrieval: RetrievalSettings = Field(default_factory=RetrievalSettings)
+    tools: ToolsSettings = Field(default_factory=ToolsSettings)
+    voice: VoiceSettings = Field(default_factory=VoiceSettings)
+    context: ContextSettings = Field(default_factory=ContextSettings)
 
 
 def load_settings(path: str | Path) -> Settings:

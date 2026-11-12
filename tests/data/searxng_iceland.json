@@ -1,0 +1,320 @@
+{
+ "query": "population of iceland",
+ "results": [
+  {
+   "template": "default.html",
+   "title": "Iceland - Wikipedia",
+   "content": "Iceland is a Nordic island country between the Arctic Ocean and the North Atlantic Ocean, located on the Mid-Atlantic Ridge between Europe and North America. It is Europe's westernmost and most sparsely populated country. Its capital and largest city is Reykjavík, which is home to about 35% of the ...",
+   "img_src": "",
+   "iframe_src": "",
+   "audio_src": "",
+   "thumbnail": "",
+   "publishedDate": null,
+   "pubdate": "",
+   "length": null,
+   "views": "",
+   "author": "",
+   "metadata": "",
+   "priority": "",
+   "engines": [
+    "brave",
+    "google cse"
+   ],
+   "open_group": false,
+   "close_group": false,
+   "positions": [
+    1,
+    2
+   ],
+   "score": 3.0,
+   "category": "general",
+   "url": "https://en.wikipedia.org/wiki/Iceland",
+   "engine": "google cse",
+   "parsed_url": [
+    "https",
+    "en.wikipedia.org",
+    "/wiki/Iceland",
+    "",
+    "",
+    ""
+   ]
+  },
+  {
+   "template": "default.html",
+   "title": "Iceland Population (1950-2026) - Macrotrends",
+   "content": "Total current population for Iceland in 2026 is 382,260, a 0.59% increase from 2025. · Total population for Iceland in 2025 was 380,010, a 0.61% increase from ...",
+   "img_src": "",
+   "iframe_src": "",
+   "audio_src": "",
+   "thumbnail": "",
+   "publishedDate": null,
+   "pubdate": "",
+   "length": null,
+   "views": "",
+   "author": "",
+   "metadata": "",
+   "priority": "",
+   "engines": [
+    "brave",
+    "google cse"
+   ],
+   "open_group": false,
+   "close_group": false,
+   "positions": [
+    3,
+    3
+   ],
+   "score": 1.3333333333333333,
+   "category": "general",
+   "url": "https://www.macrotrends.net/global-metrics/countries/isl/iceland/population",
+   "engine": "google cse",
+   "parsed_url": [
+    "https",
+    "www.macrotrends.net",
+    "/global-metrics/countries/isl/iceland/population",
+    "",
+    "",
+    ""
+   ]
+  },
+  {
+   "template": "default.html",
+   "title": "Demographics of Iceland - Wikipedia",
+   "content": "Official statistics begin in 1703, since when the population has grown from 50,358 to 394,234 (1 January 2026). Most Icelandic people are descendants of Norwegian settlers, and of Gaels from Ireland and Scotland who were brought over as slaves during the settlement of Iceland in the ninth century ...",
+   "img_src": "",
+   "iframe_src": "",
+   "audio_src": "",
+   "thumbnail": "",
+   "publishedDate": null,
+   "pubdate": "",
+   "length": null,
+   "views": "",
+   "author": "",
+   "metadata": "",
+   "priority": "",
+   "engines": [
+    "brave",
+    "google cse"
+   ],
+   "open_group": false,
+   "close_group": false,
+   "positions": [
+    14,
+    6
+   ],
+   "score": 0.47619047619047616,
+   "category": "general",
+   "url": "https://en.wikipedia.org/wiki/Demographics_of_Iceland",
+   "engine": "google cse",
+   "parsed_url": [
+    "https",
+    "en.wikipedia.org",
+    "/wiki/Demographics_of_Iceland",
+    "",
+    "",
+    ""
+   ]
+  },
+  {
+   "template": "default.html",
+   "title": "Iceland Population (2026) - Population TODAY",
+   "content": "The current population of Iceland is 403,634 with an annual growth rate of 0.919%. Iceland has a population of 0.005% of the world's population.",
+   "img_src": "",
+   "iframe_src": "",
+   "audio_src": "",
+   "thumbnail": "",
+   "publishedDate": null,
+   "pubdate": null,
+   "length": null,
+   "views": "",
+   "author": "",
+   "metadata": "",
+   "priority": "",
+   "engines": [
+    "brave"
+   ],
+   "open_group": false,
+   "close_group": false,
+   "positions": [
+    8
+   ],
+   "score": 0.125,
+   "category": "general",
+   "url": "https://populationtoday.com/is-iceland/",
+   "engine": "brave",
+   "parsed_url": [
+    "https",
+    "populationtoday.com",
+    "/is-iceland/",
+    "",
+    "",
+    ""
+   ]
+  },
+  {
+   "template": "default.html",
+   "title": "Iceland Facts 2026: Population 403,137, Capital Reykjavik, GDP ...",
+   "content": "Iceland is in Northern Europe, northwest of the United Kingdom; capital Reykjavik. Population 403,137, GDP $39.6B (2026). Charts, world rankings & 205+ statistics.",
+   "img_src": "",
+   "iframe_src": "",
+   "audio_src": "",
+   "thumbnail": "",
+   "publishedDate": "2025-11-23T18:09:21",
+   "pubdate": "2025-11-23 18:09:21",
+   "length": null,
+   "views": "",
+   "author": "",
+   "metadata": "",
+   "priority": "",
+   "engines": [
+    "brave"
+   ],
+   "open_group": false,
+   "close_group": false,
+   "positions": [
+    14
+   ],
+   "score": 0.07142857142857142,
+   "category": "general",
+   "url": "https://geofactbook.com/countries/iceland",
+   "engine": "brave",
+   "parsed_url": [
+    "https",
+    "geofactbook.com",
+    "/countries/iceland",
+    "",
+    "",
+    ""
+   ]
+  },
+  {
+   "template": "default.html",
+   "title": "Iceland's Population Grew in the Second Quarter - High North News",
+   "content": "5 Aug 2026 ... Iceland's Population Grew in the Second Quarter ... Iceland's population reached 396,500 at the end of the second quarter of 2026, according to ...",
+   "img_src": "",
+   "iframe_src": "",
+   "audio_src": "",
+   "thumbnail": "",
+   "publishedDate": null,
+   "pubdate": "",
+   "length": null,
+   "views": "",
+   "author": "",
+   "metadata": "",
+   "priority": "",
+   "engines": [
+    "google cse"
+   ],
+   "open_group": false,
+   "close_group": false,
+   "positions": [
+    15
+   ],
+   "score": 0.06666666666666667,
+   "category": "general",
+   "url": "https://en.highnorthnews.com/notice/1115579",
+   "engine": "google cse",
+   "parsed_url": [
+    "https",
+    "en.highnorthnews.com",
+    "/notice/1115579",
+    "",
+    "",
+    ""
+   ]
+  },
+  {
+   "template": "default.html",
+   "title": "Iceland | Arctic Council",
+   "content": "Iceland has approximately 400,000 inhabitants. Iceland's key industries have been largely based on the sustainable utilization of natural marine and energy ...",
+   "img_src": "",
+   "iframe_src": "",
+   "audio_src": "",
+   "thumbnail": "",
+   "publishedDate": null,
+   "pubdate": "",
+   "length": null,
+   "views": "",
+   "author": "",
+   "metadata": "",
+   "priority": "",
+   "engines": [
+    "google cse"
+   ],
+   "open_group": false,
+   "close_group": false,
+   "positions": [
+    16
+   ],
+   "score": 0.0625,
+   "category": "general",
+   "url": "https://arctic-council.org/about/states/iceland/",
+   "engine": "google cse",
+   "parsed_url": [
+    "https",
+    "arctic-council.org",
+    "/about/states/iceland/",
+    "",
+    "",
+    ""
+   ]
+  },
+  {
+   "template": "default.html",
+   "title": "Iceland population 2026 - StatisticsTimes.com",
+   "content": "As of October 23, 2026, Iceland's population is estimated at 403,493, based on linear interpolation between the most recent official reference dates in the United Nations population projections.",
+   "img_src": "",
+   "iframe_src": "",
+   "audio_src": "",
+   "thumbnail": "",
+   "publishedDate": null,
+   "pubdate": null,
+   "length": null,
+   "views": "",
+   "author": "",
+   "metadata": "",
+   "priority": "",
+   "engines": [
+    "brave"
+   ],
+   "open_group": false,
+   "close_group": false,
+   "positions": [
+    18
+   ],
+   "score": 0.05555555555555555,
+   "category": "general",
+   "url": "https://statisticstimes.com/demographics/country/iceland-population.php",
+   "engine": "brave",
+   "parsed_url": [
+    "https",
+    "statisticstimes.com",
+    "/demographics/country/iceland-population.php",
+    "",
+    "",
+    ""
+   ]
+  }
+ ],
+ "answers": [],
+ "corrections": [],
+ "infoboxes": [],
+ "suggestions": [
+  "what is the population of iceland reykjavik",
+  "iceland population male vs female",
+  "area of iceland",
+  "population of iceland immigrants",
+  "reykjavík population",
+  "iceland population 2050",
+  "size of iceland",
+  "population of iceland by age",
+  "population of iceland by race",
+  "population of iceland with tourists"
+ ],
+ "unresponsive_engines": [
+  [
+   "duckduckgo",
+   "CAPTCHA"
+  ]
+ ]
+}

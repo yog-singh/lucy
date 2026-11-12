@@ -17,6 +17,7 @@ from lucy.memory.extraction import (
     ExtractedStatement,
     Extractor,
     check_candidate,
+    is_change_event,
     parse_date,
     turn_key,
 )
@@ -33,6 +34,7 @@ from tests.memory_extraction_support import (
     cand,
     decision,
     extraction,
+    reply,
     turn,
 )
 
@@ -744,6 +746,7 @@ async def test_a_change_of_state_replaces_the_old_state_with_the_new_one(
         "a change event; the new state is stored as 'Tobias lives in Porto city'"
     ]
     assert second.results[0].outcome is Outcome.SUPERSEDE
+    assert second.results[1].outcome is Outcome.IGNORE
     assert "already replaced from this turn" in second.results[1].reason
     lisbon = next(
         s
@@ -864,3 +867,95 @@ async def test_a_rerun_after_a_crash_in_other_words_creates_no_duplicate(
     assert [r.outcome for r in report.turns[0].results] == [Outcome.DUPLICATE] * 2
     assert len(await graph.list_statements(current_only=False)) == 2
     assert len(llm.calls) == 2  # no reconciliation call
+
+
+# --- Change events without the new state ----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("predicate", "text", "change"),
+    [
+        ("switched to", "The user switched to decaf for good.", True),
+        ("prefers", "The user has switched to oat milk.", True),
+        ("moved to", "Tobias moved to Porto.", True),
+        ("started", "The user started cycling to work.", True),
+        ("took up", "The user took up bouldering.", True),
+        ("joined", "The user joined Kestrel Studio.", True),
+        ("left", "The user left Brightline.", True),
+        ("drinks", "The user drinks decaf coffee.", False),
+        ("works at", "The user works at Kestrel Studio.", False),
+        ("gave up", "The user gave up learning Italian.", False),  # an ending, handled apart
+    ],
+)
+def test_change_events_are_recognised(predicate: str, text: str, change: bool) -> None:
+    candidate = ExtractedStatement.model_validate(cand(text, predicate=predicate))
+    assert is_change_event(candidate) is change
+
+
+async def test_a_change_event_alone_replaces_the_old_state_with_the_new_state(
+    memory: SQLiteMemoryStore, graph: SQLiteGraphStore, extractor: Extractor, llm: FakeLLM
+) -> None:
+    """ "I've switched to decaf for good, my doctor told me to cut out caffeine": the model
+    writes the change event, not the new state; the old preference still ends."""
+    extractor.reconciler.policy = MemoryPolicy(
+        **TEST_POLICY_VALUES | {"statement_similarity_floor": 0.95, "change_similarity_floor": 0.0}
+    )
+    await turn(memory, "t1", "I drink a strong dark roast every morning", ts=DAY1)
+    said = DAY1 + timedelta(days=7)
+    await turn(memory, "t2", "I've switched to decaf for good, doctor's orders", ts=said)
+    script(
+        llm,
+        extraction(
+            cand(
+                "The user drinks a strong dark roast coffee every morning.",
+                predicate="drinks",
+                kind="habit",
+            )
+        ),
+        extraction(
+            cand("The user's doctor told them to cut out caffeine.", predicate="told"),
+            cand("The user switched to decaf for good.", predicate="switched to", value="decaf"),
+        ),
+        reply(
+            {
+                "new_text": "The user drinks decaf coffee every morning.",
+                "new_predicate": "drinks",
+                "action": "supersede",
+                "target": 1,
+            }
+        ),
+    )
+    report = await extractor.run(2)
+    # Two extractions and one call for the change; the doctor's advice is not
+    # similar enough to anything to ask about.
+    assert len(llm.calls) == 3
+    change = report.turns[1].results[-1]
+    assert change.outcome is Outcome.SUPERSEDE
+    assert "New statement (a change): The user switched to decaf for good." in prompt_of(llm, 2)
+    old = next(s for s in await graph.list_statements(current_only=False) if "dark" in s.text)
+    assert change.statement is not None and old.superseded_by == change.statement.id
+    assert old.invalid_at == change.statement.valid_from == said
+    assert change.statement.kind is StatementKind.HABIT
+    texts = [s.text for s in await graph.list_statements(current_only=False)]
+    assert not any("switched" in t for t in texts)
+    assert sorted(s.text for s in await graph.list_statements()) == [
+        "The user drinks decaf coffee every morning.",
+        "The user's doctor told them to cut out caffeine.",
+    ]
+
+
+async def test_a_state_is_not_treated_as_a_change(
+    memory: SQLiteMemoryStore, graph: SQLiteGraphStore, extractor: Extractor, llm: FakeLLM
+) -> None:
+    """Only change events take the extra call; a one-off choice stores nothing at all."""
+    await turn(memory, "t1", "I'll have the decaf today", ts=DAY1)
+    await turn(memory, "t2", "I take notes in Obsidian", ts=DAY1 + timedelta(days=1))
+    script(
+        llm,
+        extraction(),
+        extraction(cand("The user takes notes in Obsidian.", predicate="takes notes in")),
+    )
+    report = await extractor.run(2)
+    assert report.turns[0].results == [] and len(llm.calls) == 2
+    [result] = report.turns[1].results
+    assert result.outcome is Outcome.ADD and not result.asked_model

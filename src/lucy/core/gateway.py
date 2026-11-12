@@ -26,6 +26,23 @@ waiting on the model.
 Consumers that may stop iterating early should close the stream deterministically,
 e.g. with `contextlib.aclosing`; otherwise the lane is only released when the
 abandoned generator is finalised.
+
+Silent streams (FOREGROUND only): a role may name a `fallback` role and a
+`first_output_timeout`. A FOREGROUND stream of such a role that ends, or goes
+`first_output_timeout` seconds, without producing any text or tool call is
+closed and the request is made once more on the fallback role, whose chunks
+are then yielded as if they were the first role's. The stream stays one
+FOREGROUND stream throughout, so BACKGROUND streams keep waiting. Nothing is
+retried once text or a tool call has been yielded, and the fallback attempt is
+not retried; if it produces nothing either, or if a role with a timeout and no
+fallback produces nothing, `SilentStreamError` is raised. Each fallback is
+logged and recorded for the turn's trace (`fallbacks_in_context`,
+`add_fallbacks`).
+
+Answer steps (FOREGROUND only): a role may name an `after_tool` role, which
+then serves that role's streams whose last message is a tool result, e.g. a
+slower but more careful setting of the same model for answering from a lookup.
+The `after_tool` role's own fallback and timeout settings then apply.
 """
 
 from __future__ import annotations
@@ -34,9 +51,12 @@ import asyncio
 import json
 import logging
 import re
+import time
 from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
 from contextlib import aclosing
+from contextvars import ContextVar
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any, Final
 
@@ -45,6 +65,7 @@ from pydantic import BaseModel, ValidationError
 from lucy.core import registry as _registry
 from lucy.core.config import AdapterConfig, LLMSettings
 from lucy.core.ports import LLM
+from lucy.core.trace import StepFallback, TurnTrace
 from lucy.core.types import LLMChunk, Message, Role, ToolSpec
 
 logger = logging.getLogger(__name__)
@@ -52,6 +73,10 @@ logger = logging.getLogger(__name__)
 
 class GatewayError(LookupError):
     """An unknown role, or an adapter that is not an LLM."""
+
+
+class SilentStreamError(GatewayError):
+    """A FOREGROUND stream produced no text or tool call, even on its fallback role."""
 
 
 class Preempted(Exception):
@@ -141,6 +166,89 @@ class _Background:
             self.closer = asyncio.create_task(_aclose_logged(self.iterator))
 
 
+# --- Silent streams ------------------------------------------------------------
+
+_fallbacks: ContextVar[tuple[StepFallback, ...]] = ContextVar("lucy_llm_fallbacks", default=())
+"""Fallbacks taken by streams consumed in the current context (task), oldest first."""
+
+
+def fallbacks_in_context() -> tuple[StepFallback, ...]:
+    """The fallbacks taken by FOREGROUND streams consumed in the current task so far.
+
+    A stream is consumed in its consumer's task, so a turn's own fallbacks are
+    visible to code running later in the same task (the orchestrator records a
+    turn's trace in the task that ran the turn).
+    """
+    return _fallbacks.get()
+
+
+def add_fallbacks(trace: TurnTrace) -> TurnTrace:
+    """`trace` with each step's `fallback` filled in from `fallbacks_in_context`.
+
+    A fallback belongs to the step during which it started. Steps that already
+    have one are left alone.
+    """
+    taken = list(fallbacks_in_context())
+    if not taken:
+        return trace
+    steps = []
+    for step in trace.steps:
+        match = next((f for f in taken if step.started_at <= f.at <= step.ended_at), None)
+        if match is not None and step.fallback is None:
+            taken.remove(match)
+            step = step.model_copy(update={"fallback": match})
+        steps.append(step)
+    return trace.model_copy(update={"steps": steps})
+
+
+@dataclass
+class _Attempt:
+    """The outcome of one guarded attempt: why it produced nothing, if it did not."""
+
+    silent: str | None = None
+
+
+async def _guarded(
+    iterator: AsyncIterator[LLMChunk], timeout: float | None, attempt: _Attempt
+) -> AsyncGenerator[LLMChunk, None]:
+    """Yield `iterator`'s chunks; if it ends or times out before any text or tool call,
+    set `attempt.silent` and yield nothing at all.
+
+    Chunks without text or a tool call (a bare finish reason) are held back until
+    output arrives. `timeout` bounds the wait for the first output only. The
+    adapter stream is closed however this ends.
+    """
+    held: list[LLMChunk] = []
+    started = time.monotonic()
+    loop_time = asyncio.get_running_loop().time
+    deadline = None if timeout is None else loop_time() + timeout
+    try:
+        while True:
+            limit = asyncio.timeout_at(deadline)
+            try:
+                async with limit:
+                    item = await _next(iterator)
+            except TimeoutError:
+                if not limit.expired():
+                    raise
+                attempt.silent = f"no output within {timeout:g}s"
+                return
+            if item is _DONE:
+                attempt.silent = f"ended without output after {time.monotonic() - started:.1f}s"
+                return
+            assert isinstance(item, LLMChunk)
+            if item.text or item.tool_call is not None:
+                break
+            held.append(item)
+        for chunk in held:
+            yield chunk
+        yield item
+        async for chunk in iterator:
+            yield chunk
+    finally:
+        await _aclose(iterator)
+
+
 # --- Structured output helpers -------------------------------------------------
 
 _FENCE: Final = re.compile(r"\A```[A-Za-z0-9_-]*[ \t]*\n?(?P<body>.*?)\n?[ \t]*```\Z", re.DOTALL)
@@ -185,8 +293,26 @@ def _correction(errors: str, *, native: bool) -> str:
 class LLMGateway:
     """Hands out LLMs by role and schedules their streams by priority."""
 
-    def __init__(self, llms: Mapping[str, LLM]) -> None:
+    def __init__(
+        self,
+        llms: Mapping[str, LLM],
+        *,
+        fallbacks: Mapping[str, str] | None = None,
+        first_output_timeouts: Mapping[str, float] | None = None,
+        after_tool: Mapping[str, str] | None = None,
+    ) -> None:
+        """`fallbacks` maps a role to the role that serves its silent FOREGROUND
+        streams; `first_output_timeouts` gives a role's seconds to first output;
+        `after_tool` maps a role to the role that serves its FOREGROUND streams
+        ending in a tool result (see the module docstring)."""
         self._llms = dict(llms)
+        self._fallbacks = dict(fallbacks or {})
+        self._first_output_timeouts = dict(first_output_timeouts or {})
+        self._after_tool = dict(after_tool or {})
+        for kind, routes in (("fallback", self._fallbacks), ("after_tool", self._after_tool)):
+            for role, other in routes.items():
+                if other not in self._llms or other == role:
+                    raise GatewayError(f"role {role!r} has an invalid {kind} role {other!r}")
         self._foreground_active = 0
         self._background_waiting = 0
         self._background_running: set[_Background] = set()
@@ -199,22 +325,34 @@ class LLMGateway:
     ) -> LLMGateway:
         """Create one adapter per distinct role config through `registry` (default: global).
 
-        Roles whose `AdapterConfig` is identical share one adapter instance.
+        Roles with the same adapter and options share one adapter instance.
+        Each role's `fallback` and `first_output_timeout` are taken over.
         """
         create = registry.create if registry is not None else _registry.create
         created: list[tuple[AdapterConfig, LLM]] = []
         llms: dict[str, LLM] = {}
         for role, config in llm_settings.roles.items():
-            llm = next((inst for cfg, inst in created if cfg == config), None)
+            adapter = AdapterConfig(adapter=config.adapter, options=config.options)
+            llm = next((inst for cfg, inst in created if cfg == adapter), None)
             if llm is None:
                 llm = create("llm", config.adapter, **config.options)
                 if not isinstance(llm, LLM):
                     raise GatewayError(
                         f"adapter {config.adapter!r} for role {role!r} is not an LLM"
                     )
-                created.append((config, llm))
+                created.append((adapter, llm))
             llms[role] = llm
-        return cls(llms)
+        roles = llm_settings.roles
+        return cls(
+            llms,
+            fallbacks={r: c.fallback for r, c in roles.items() if c.fallback is not None},
+            first_output_timeouts={
+                r: c.first_output_timeout
+                for r, c in roles.items()
+                if c.first_output_timeout is not None
+            },
+            after_tool={r: c.after_tool for r, c in roles.items() if c.after_tool is not None},
+        )
 
     def for_role(self, role: str) -> LLM:
         """The LLM configured for `role`."""
@@ -255,18 +393,28 @@ class LLMGateway:
         """Stream the response of the `role` LLM, scheduled by `priority`.
 
         `response_schema` is passed to the adapter (see `LLM.stream`). Raises
-        `GatewayError` (on first iteration) if `role` is unknown, and `Preempted`
-        if a BACKGROUND stream is pre-empted.
+        `GatewayError` (on first iteration) if `role` is unknown, `Preempted`
+        if a BACKGROUND stream is pre-empted, and `SilentStreamError` if a
+        FOREGROUND stream of a role with a fallback or a first-output timeout
+        produces nothing (see the module docstring).
         """
         llm = self.for_role(role)
-        lane = self._foreground if priority is Priority.FOREGROUND else self._background
+        if priority is Priority.FOREGROUND:
+            answer_role = self._after_tool.get(role)
+            if answer_role is not None and messages and messages[-1].role is Role.TOOL:
+                logger.debug("serving a %r step after a tool result on %r", role, answer_role)
+                role, llm = answer_role, self._llms[answer_role]
+            chunks = self._foreground(role, llm, messages, tools, response_schema)
+        else:
+            chunks = self._background(llm, messages, tools, response_schema)
         # Close the lane generator deterministically when this one is closed.
-        async with aclosing(lane(llm, messages, tools, response_schema)) as chunks:
+        async with aclosing(chunks):
             async for chunk in chunks:
                 yield chunk
 
     async def _foreground(
         self,
+        role: str,
         llm: LLM,
         messages: Sequence[Message],
         tools: Sequence[ToolSpec],
@@ -277,13 +425,55 @@ class LLMGateway:
         try:
             for background in list(self._background_running):
                 background.preempt()
+            fallback = self._fallbacks.get(role)
+            timeout = self._first_output_timeouts.get(role)
+            if fallback is None and timeout is None:
+                iterator = _open(llm, messages, tools, response_schema)
+                try:
+                    async for chunk in iterator:
+                        yield chunk
+                finally:
+                    # Close the adapter's generator however iteration ended.
+                    await _aclose(iterator)
+                return
+
+            started = time.monotonic()
+            first = _Attempt()
             iterator = _open(llm, messages, tools, response_schema)
-            try:
-                async for chunk in iterator:
+            async with aclosing(_guarded(iterator, timeout, first)) as chunks:
+                async for chunk in chunks:
                     yield chunk
-            finally:
-                # Close the adapter's generator however iteration ended.
-                await _aclose(iterator)
+            if first.silent is None:
+                return
+            if fallback is None:
+                raise SilentStreamError(f"the {role!r} model produced no output ({first.silent})")
+            lost = time.monotonic() - started
+            logger.warning(
+                "the %r model produced no output (%s); asking role %r instead (%.1fs lost)",
+                role,
+                first.silent,
+                fallback,
+                lost,
+            )
+            record = StepFallback(
+                role=role,
+                served_by=fallback,
+                reason=first.silent,
+                lost_seconds=round(lost, 3),
+                at=datetime.now(UTC),
+            )
+            _fallbacks.set((*_fallbacks.get(), record))
+            second = _Attempt()
+            iterator = _open(self._llms[fallback], messages, tools, response_schema)
+            timeout = self._first_output_timeouts.get(fallback)
+            async with aclosing(_guarded(iterator, timeout, second)) as chunks:
+                async for chunk in chunks:
+                    yield chunk
+            if second.silent is not None:
+                raise SilentStreamError(
+                    f"the {role!r} model produced no output ({first.silent}), and neither did "
+                    f"its fallback role {fallback!r} ({second.silent})"
+                )
         finally:
             self._foreground_active -= 1
             if self._foreground_active == 0:

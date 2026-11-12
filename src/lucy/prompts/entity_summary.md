@@ -6,6 +6,7 @@ Rules:
 - One or two sentences, plain text, no lists or Markdown.
 - Use only what the statements say. Do not add names, places, numbers or details that are not in them.
 - Start with the name.
+- Use "he" or "she" only if a statement does or says the person is a man or a woman (a word like "sister" counts); otherwise repeat the name. Never guess anyone's gender, including the user's.
 - Write only the description, nothing before or after it.
 
 Example input:
