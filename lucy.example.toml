@@ -78,6 +78,22 @@ vad_threshold       = 0.5
 # input_device  = "MacBook Pro Microphone"
 # output_device = "MacBook Pro Speakers"
 
+[wake]
+# Optional; these are the defaults. How `lucy listen` waits for the wake phrase
+# before a voice turn (`lucy voice` ignores this section). The models are
+# openWakeWord's pretrained ones (CC BY-NC-SA 4.0, non-commercial use only),
+# downloaded by `lucy listen --download-models` into data/models/wakeword/.
+# The phrase as spoken; it is removed from the start of what Lucy hears.
+phrase           = "hey jarvis"
+model            = "data/models/wakeword/hey_jarvis_v0.1.onnx"
+# Score (0 to 1) from which the phrase counts as said. Higher: fewer false
+# wakes, more misses.
+threshold        = 0.5
+# After a reply, how long you can speak again without the wake phrase.
+followup_seconds = 8
+# A short chime on waking, and a falling one on going back to waiting.
+chime            = true
+
 [embedder]
 # Ollama adds no prefixes (the model template is the bare prompt), so the
 # adapter prepends them by kind. For embeddinggemma-2, "query: " / "passage: "

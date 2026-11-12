@@ -11,6 +11,7 @@ from lucy.core.config import (
     ResidencySettings,
     RetrievalSettings,
     VoiceSettings,
+    WakeSettings,
     load_settings,
 )
 from lucy.memory import retrieval
@@ -75,6 +76,7 @@ def test_loads_example() -> None:
     )
     # The example's [voice] and [residency] sections document the defaults.
     assert settings.voice == VoiceSettings()
+    assert settings.wake == WakeSettings()
     assert settings.residency == ResidencySettings()
     assert settings.embedder == AdapterConfig(
         adapter="ollama",

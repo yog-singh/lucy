@@ -94,6 +94,21 @@ uv run lucy voice --input-wav question1.wav question2.wav --output-wav lucy.wav 
 
 The WAV files are played as the microphone in real time (`--fast` simulates time instead; latencies are then not real), and what Lucy says is written to `--output-wav`, aligned with the input's timeline. With `--wait-for-reply` each file is one turn, started once Lucy has answered the previous one; without it the files follow each other directly, as someone who does not wait for her would. The command exits once the input has ended and the last reply has been spoken.
 
+### Wake word
+
+`lucy listen` runs the same voice session behind a wake phrase, for now openWakeWord's pretrained "hey jarvis" (a custom "Hey Lucy" comes later). While waiting, only the microphone and three small wake-word models run (about 70 MB and under 2% of a core); the speech recogniser, synthesiser and the rest of Lucy start on the first wake (about 2 s, while your words keep being recorded) and then stay loaded.
+
+```sh
+uv run lucy listen --download-models   # once: fetch the models into data/models/wakeword/
+uv run lucy listen                     # say "hey jarvis, what's the weather in Porto?"
+```
+
+- The models are downloaded, not shipped: openWakeWord's pretrained models are licensed CC BY-NC-SA 4.0 (non-commercial use only). Each file is checked against a SHA-256 pinned in the code.
+- Say the request in the same breath as the wake phrase, or say the phrase alone and then the request. A short rising chime means Lucy is listening; the wake phrase is removed from what she hears.
+- After her reply you can speak again without the wake phrase for `followup_seconds` (8 s); then a falling chime means she is waiting for the wake phrase again.
+- Half-duplex as in `lucy voice`: while she thinks or speaks the microphone, including the wake word, is ignored; Enter stops her, Ctrl-C quits.
+- `[wake]` in `lucy.example.toml` sets the phrase, model, threshold (0.5), follow-up window and chimes. File mode (`--input-wav`, `--output-wav`, `--fast`, `--wait-for-reply`) works as for `lucy voice`.
+
 ## Memory commands
 
 `uv run lucy memory ACTION` inspects and controls what Lucy has learned. Every action takes `--config PATH` and `--verbose`. Statement and entity ids are printed as `#12`.
@@ -154,6 +169,10 @@ uv run lucy eval --scenario update_moved_city # one scenario (repeatable)
 uv run lucy eval --compare data/evals/eval-20261112-090000.json   # run, then show what changed
 uv run lucy eval --compare OLD.json NEW.json  # compare two saved runs
 ```
+
+## Checks
+
+`lucy eval` is the scenario-based memory check. The other measurements that changes to prompts, models or the pipeline are judged against live in `checks/` (not part of the installed package): grounding in looked-up evidence, tool choice, memory extraction, and an end-to-end voice run. [checks/README.md](checks/README.md) says how to run each, what the scores mean and the latest baselines. They use `lucy.example.toml` unless given `--config`, and write only under `data/checks/`.
 
 ## Tests
 

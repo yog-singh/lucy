@@ -282,6 +282,27 @@ class VoiceSettings(BaseModel):
     """Speaker, as for `input_device`."""
 
 
+class WakeSettings(BaseModel):
+    """`lucy listen`: the wake phrase in front of the voice session (see docs/voice.md).
+
+    `lucy voice` does not use it.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    phrase: str = Field(default="hey jarvis", min_length=1)
+    """The wake phrase as spoken; it is removed from the start of the transcript."""
+    model: str = "data/models/wakeword/hey_jarvis_v0.1.onnx"
+    """The phrase model (ONNX); the mel and embedding models are expected beside it."""
+    threshold: float = Field(default=0.5, gt=0, lt=1)
+    """Wake-word score from which the phrase counts as said."""
+    followup_seconds: float = Field(default=8.0, ge=0, le=120)
+    """After a reply (or the wake phrase alone), how long Lucy keeps listening without
+    the wake phrase before going back to waiting."""
+    chime: bool = True
+    """Play a short chime on waking and on going back to waiting."""
+
+
 class ContextSettings(BaseModel):
     """How the chat prompt is arranged (see `lucy.core.context`)."""
 
@@ -330,6 +351,7 @@ class Settings(BaseModel):
     retrieval: RetrievalSettings = Field(default_factory=RetrievalSettings)
     tools: ToolsSettings = Field(default_factory=ToolsSettings)
     voice: VoiceSettings = Field(default_factory=VoiceSettings)
+    wake: WakeSettings = Field(default_factory=WakeSettings)
     context: ContextSettings = Field(default_factory=ContextSettings)
     residency: ResidencySettings = Field(default_factory=ResidencySettings)
 

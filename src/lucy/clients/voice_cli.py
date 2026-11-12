@@ -88,6 +88,54 @@ def add_parser(commands: Any, common: argparse.ArgumentParser) -> None:
     )
 
 
+def add_listen_parser(commands: Any, common: argparse.ArgumentParser) -> None:
+    """Register the `listen` subcommand: `lucy voice` behind a wake phrase."""
+    listen = commands.add_parser(
+        "listen",
+        parents=[common],
+        help="wait for the wake phrase, then talk with Lucy",
+        description=(
+            "Wait in the background for the wake phrase ([wake] phrase, 'hey jarvis' by"
+            " default), then talk as in `lucy voice`. After a reply you can speak again"
+            " without the wake phrase for [wake] followup_seconds. Enter stops Lucy while"
+            " she is thinking or speaking; Ctrl-C or Ctrl-D quits."
+        ),
+    )
+    listen.add_argument(
+        "--session",
+        default=DEFAULT_SESSION,
+        help=f"conversation to continue or start (default: {DEFAULT_SESSION!r}, as in chat)",
+    )
+    listen.add_argument(
+        "--download-models",
+        action="store_true",
+        help="download openWakeWord's models (CC BY-NC-SA 4.0, non-commercial), then exit",
+    )
+    listen.add_argument(
+        "--input-wav",
+        nargs="+",
+        type=Path,
+        metavar="FILE",
+        help="read sound from WAV files instead of the microphone (test and demo mode)",
+    )
+    listen.add_argument(
+        "--output-wav",
+        type=Path,
+        metavar="FILE",
+        help="with --input-wav: write what Lucy plays to this WAV file instead of the speaker",
+    )
+    listen.add_argument(
+        "--fast",
+        action="store_true",
+        help="with --input-wav: simulated time instead of real time (latencies are not real)",
+    )
+    listen.add_argument(
+        "--wait-for-reply",
+        action="store_true",
+        help="with --input-wav: each file starts after Lucy has answered the previous one",
+    )
+
+
 def list_devices(out: TextIO, err: TextIO, sd: Any = None) -> int:
     """`lucy voice --list-devices`."""
     from lucy.voice.audio import AudioDeviceError
@@ -291,7 +339,7 @@ async def _converse(
     err: TextIO,
     interactive: bool,
 ) -> int:
-    from lucy.clients.cli import StdinReader, memory_banner
+    from lucy.clients.cli import memory_banner
     from lucy.voice.session import VoiceConfig, VoiceSession
 
     ui = TerminalUI(out, err, show_state=interactive)
@@ -320,9 +368,24 @@ async def _converse(
         print("Ctrl-C quits.", file=err)
     err.flush()
 
+    await _run_with_keys(session.run(), session.interrupt, session.stop, err, interactive)
+    return 0
+
+
+async def _run_with_keys(
+    run: Any,
+    interrupt: Callable[[], object],
+    stop: Callable[[], None],
+    err: TextIO,
+    interactive: bool,
+) -> None:
+    """Await `run` with Ctrl-C bound to `stop` and, if `interactive`, Enter to
+    `interrupt` and q or Ctrl-D to `stop`."""
+    from lucy.clients.cli import StdinReader
+
     loop = asyncio.get_running_loop()
     try:
-        loop.add_signal_handler(signal.SIGINT, session.stop)
+        loop.add_signal_handler(signal.SIGINT, stop)
         handler_installed = True
     except (NotImplementedError, RuntimeError):
         handler_installed = False
@@ -338,11 +401,11 @@ async def _converse(
                     while (line := await reader.readline()) is not None:
                         if line.strip().lower() in QUIT_KEYS:
                             break
-                        session.interrupt()
-                    session.stop()
+                        interrupt()
+                    stop()
 
                 keys = asyncio.create_task(read_keys(), name="lucy-voice-keys")
-            await session.run()
+            await run
     finally:
         if keys is not None:
             keys.cancel()
@@ -352,4 +415,152 @@ async def _converse(
         if interactive:
             err.write("\r\x1b[K")
             err.flush()
+
+
+# --- lucy listen ------------------------------------------------------------------------
+
+MISSING_MODELS_HINT: Final = (
+    "wake-word models not found in {directory}; run `lucy listen --download-models`"
+    " (openWakeWord's pretrained models, CC BY-NC-SA 4.0: non-commercial use only)"
+)
+
+
+async def download_wake_models(
+    model: str | Path, *, out: TextIO, err: TextIO, transport: Any = None
+) -> int:
+    """`lucy listen --download-models`: fetch the models into the phrase model's directory."""
+    from lucy.voice.wakeword import download_models
+
+    directory = Path(model).parent
+    print(
+        "Downloading openWakeWord's models (licensed CC BY-NC-SA 4.0: non-commercial use"
+        f" only) into {directory}",
+        file=err,
+    )
+    try:
+        await download_models(directory, transport=transport, report=lambda s: print(s, file=out))
+    except Exception as exc:
+        print(f"lucy listen: download failed: {exc}", file=err)
+        return 1
     return 0
+
+
+async def run_listen(
+    settings: Settings,
+    args: argparse.Namespace,
+    *,
+    out: TextIO,
+    err: TextIO,
+    registry: Registry | None = None,
+    make_vad: Callable[[], Any] | None = None,
+    make_audio: Callable[[], AudioIO] | None = None,
+    make_detector: Callable[[], Any] | None = None,
+    interactive: bool | None = None,
+) -> int:
+    """Run `lucy listen` with parsed `args`; returns the exit code.
+
+    While waiting only the audio input and the wake-word models run; the app (with
+    the speech recogniser and synthesiser) and the VAD start on the first wake and
+    stay up. `registry`, `make_vad`, `make_audio` and `make_detector` are for tests.
+    """
+    from lucy.app import LucyApp
+    from lucy.clients.cli import backlog_message, memory_banner
+    from lucy.voice.audio import AudioDeviceError, FileAudioIO, SoundDeviceIO
+    from lucy.voice.session import VoiceConfig, VoiceSession
+    from lucy.voice.vad import SileroVAD
+    from lucy.voice.wake import ListenerConfig, WakeListener, WakePhraseSTT, WakeStage
+    from lucy.voice.wakeword import OpenWakeWordDetector, missing_models
+
+    wake = settings.wake
+    if args.download_models:
+        return await download_wake_models(wake.model, out=out, err=err)
+    problem = _check_args(args)
+    if problem is not None:
+        print(f"lucy listen: {problem}", file=err)
+        return 2
+    if make_detector is None:
+        if missing_models(Path(wake.model)):
+            print(f"lucy listen: {MISSING_MODELS_HINT.format(directory=Path(wake.model).parent)}",
+                  file=err)  # fmt: skip
+            return 1
+        detector = OpenWakeWordDetector(wake.model)
+        detector.load()
+    else:
+        detector = make_detector()
+    file_mode = args.input_wav is not None
+    if interactive is None:
+        interactive = not file_mode and sys.stdin.isatty() and err.isatty()
+
+    def default_audio() -> AudioIO:
+        if file_mode:
+            return FileAudioIO(
+                args.input_wav,
+                realtime=not args.fast,
+                output_path=args.output_wav,
+                wait_for_reply=args.wait_for_reply,
+            )
+        voice = settings.voice
+        return SoundDeviceIO(input_device=voice.input_device, output_device=voice.output_device)
+
+    try:
+        io = (make_audio or default_audio)()
+    except ValueError as exc:
+        print(f"lucy listen: {exc}", file=err)
+        return 2
+    ui = TerminalUI(out, err, show_state=interactive)
+    app: LucyApp | None = None
+
+    async def make_session(session_io: AudioIO, session_ui: Any) -> VoiceSession:
+        nonlocal app
+        app = LucyApp(settings, registry=registry, speech=True)
+        await app.start()
+        vad = (make_vad or SileroVAD)()
+        load = getattr(vad, "load", None)
+        if load is not None:
+            load()
+        earlier = len(await app.memory.recent_episodes(args.session, 1_000_000))
+        ui.notice(f"Session {args.session!r} ({earlier} earlier events). {memory_banner(app)}")
+        return VoiceSession(
+            bus=app.bus,
+            session_id=args.session,
+            io=session_io,
+            vad=vad,
+            stt=WakePhraseSTT(app.stt, wake.phrase),
+            tts=app.tts,
+            config=VoiceConfig.from_settings(settings.voice),
+            ui=session_ui,
+            timings_path=timings_path(settings),
+        )
+
+    listener = WakeListener(
+        io=io,
+        stage=WakeStage(detector, threshold=wake.threshold),
+        make_session=make_session,
+        ui=ui,
+        config=ListenerConfig(
+            phrase=wake.phrase, followup_s=wake.followup_seconds, chime=wake.chime
+        ),
+    )
+    print(f"Audio: {io.describe()}", file=err)
+    print(
+        f"Say {wake.phrase!r} to wake Lucy."
+        + (" Enter stops her while she thinks or speaks;" if interactive else "")
+        + " Ctrl-C quits.",
+        file=err,
+    )
+    err.flush()
+    code = 0
+    try:
+        if isinstance(io, SoundDeviceIO):
+            await io.start()
+        await _run_with_keys(listener.run(), listener.interrupt, listener.stop, err, interactive)
+    except AudioDeviceError as exc:
+        print(f"lucy listen: {exc}", file=err)
+        code = 1
+    finally:
+        await io.close()
+        if app is not None:
+            await app.stop()
+    if app is not None and (message := backlog_message(app.backlog)) is not None:
+        print(message, file=err)
+    return code
