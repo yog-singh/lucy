@@ -2,6 +2,21 @@
 
 Dated notes on what was built, what failed and what changed. Newest first.
 
+## 2026-11-13: prompt layout and model residency
+
+- Decided by the user: keep `gemma4:12b-mlx`, make the reordered prompt layout the default, and bound the model's memory by unloading when idle. Implemented by a sub-agent; recorded in ADR 0017 and amendments to ADRs 0004 and 0005. 1591 tests pass. Not yet committed.
+- Prompt layout `stable_prefix` is now the default (old one selectable). Compared on the real model, two runs each, old against new: grounding 61 and 60 of 62 against 62 and 60; tool choice 25 and 24 of 25 against 25 and 25; memory eval 17 and 16 of 18 against 18 and 18; first word after a lookup 4 to 6 s against about 3 s. No reply read the date or the memory block aloud.
+- Residency built as `core/residency.py`, with Ollama-specific calls in the adapter behind a capability. Live, with the policy inside Lucy:
+  - Voice, three ten-turn runs: 1.26 to 1.34 s median from end of speech to first audio; model 10.0 GB peak and 8.4 GB median; 9 to 10 unloads per run, each re-warmed in 2 to 2.8 s during playback.
+  - Text, 20 turns with 20 s between messages: 0.36 s median first word, model 9.4 GB median. With 8 s between messages the policy does not act and the model reaches 16.3 GB.
+  - The text quiet period is 10 s and adaptive, not the 15 to 30 s first specified: at 15 s the re-warm (5.5 to 8 s with tools) collided with a reply sent 20 s later on every turn and the median first word was 3.29 s.
+  - A turn arriving during a warm-up cancels a first pre-fill (2.1 s to first token) and waits out a second (about 1.8 s on average); fully warm is 0.30 s and fully cold 3.4 s.
+  - Correctness with unloads forced to happen: tool choice 25 of 25 with 7 unloads; memory eval 17 of 18 with 46 unloads; no errors, timeouts or empty replies; no unload inside a turn; warm-ups left no episodes or traces.
+- Stale answers: the source is replayed history, not memory. `lucy chat` and `lucy voice` continue the session `cli` across runs, so an old answer is replayed and history carries no timestamps. One sentence added to the tool guidance; a stale-news case went from 1 of 4 to 4 of 4, and the weather cases already passed.
+- Found and fixed: the eval runner's "memory given" diagnostic read only the first system message and would have reported "none" under the new layout.
+- Open: fast text chat is not bounded; a long first turn after an unload can cost a few seconds; history messages have no dates.
+- Planned next, discussed with the user: a lightweight wake-word listener (stage 3 of voice), using openWakeWord's ONNX models with a custom "Hey Lucy" model.
+
 ## 2026-11-12: leftovers, voice design, tools started
 
 - PR 1 opened with the core, text chat and memory system.
@@ -77,6 +92,11 @@ Dated notes on what was built, what failed and what changed. Newest first.
   - The agent measured on a temporary second Ollama server it started on another port with its own environment, sharing the model store read-only, and stopped it afterwards.
   - Its early runs disturbed other agents' measurements: it evicted and once stopped the MLX model, and at one point both models were loaded and swap reached 24 GB.
   - Other findings: Ollama's app-level context length is 262,144 and global; `ollama ps` reports the wrong size for llama.cpp models; the MLX build looped on 12 of 12 replays of one "next turn" prompt with tools offered, which the fallback recovers.
+- PR 2 opened with the tools, voice stage 1, grounding and stability work.
+- A second model test (quantisation-aware GGUF build, deeper step after lookups, prompt reordering) was stopped by the user before it produced results. It left `gemma4:12b-it-qat` installed, a `stable_prefix` prompt layout option with tests (uncommitted), and copies of the measurement checks under `data/scratch/checks/` after the session's scratch directory became unavailable.
+- Bounded-cache test on the current MLX build, requested by the user (measurement only; material under `data/scratch/bounded/`). Results are in `voice.md`. Summary: the cache limit is a constant in Ollama's source and cannot be configured; unloading when idle and re-warming the prompt prefix holds the model at about 8.4 GB median and 10 GB peak with voice latency unchanged at a 1.3 s median; it needs the `stable_prefix` layout. Growth is per request (about 0.7 to 1.0 GB each), not specific to background learning, which refutes my earlier guess. The 7.35 s stage 1 latency did not reproduce and is attributed to other memory use at that time.
+  - Running the same weights under `mlx-lm`'s own server is not practical: Ollama's stored weights do not load there, and it lacks schema-constrained output.
+  - Noted by the agent: an earlier agent's timing script paired requests and responses in arrival order, so its per-request first-token figures are misaligned in sessions with pre-empted background calls.
 - Home control is planned through Home Assistant's API as act-tier tools. Wyoming is Home Assistant's protocol for voice services, not device control; it is a candidate for STT, TTS and wake-word adapters in the voice phase (to be confirmed against current documentation).
 
 ## 2026-11-12: text brain runs end to end

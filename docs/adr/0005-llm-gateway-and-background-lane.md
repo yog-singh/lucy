@@ -17,6 +17,8 @@ Amended 2026-11-12, as implemented:
 - The job runner treats `Preempted` as a deferral: the job returns to the queue without using up an attempt.
 - The queue assumes a single Lucy process per database file. Handlers must be safe to run twice, because a job interrupted by a crash is run again.
 
+Amended 2026-11-13: a foreground stream first passes a gate held by the residency policy (ADR 0017). If a warm-up is in flight, the gate cancels a first pre-fill and waits for any other step, for at most 15 s. Warm-up requests themselves are outside both lanes.
+
 ## Consequences
 
 - Conversation latency is protected.
