@@ -49,5 +49,11 @@ extend-exclude = ["legacy"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 
+[tool.ruff.lint.per-file-ignores]
+# Measurement scripts moved from scratch; kept as written so their figures stay
+# comparable with the recorded baselines (see checks/README.md).
+"checks/**" = ["E501", "E731", "E741"]
+"checks/voice_e2e/analyse.py" = ["F841"]
+
 [tool.ruff.lint.isort]
 known-first-party = ["lucy"]
