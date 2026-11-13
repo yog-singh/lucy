@@ -105,3 +105,17 @@ Baselines:
 | 2026-11-13 | Residency built in (the default): 1.26 to 1.34 s median over three runs, worst turn 1.8 s; model 10.0 GB peak, 8.4 GB median |
 
 Known flaw (not in these scripts): an earlier timing script, not kept, paired requests and responses in arrival order, so its per-request first-token figures are misaligned in sessions where background calls were pre-empted. The figures above come from Lucy's own per-turn timings, which do not have that problem.
+
+## calendar_live
+
+A smoke test of the calendar tools on this Mac's real calendar, with no model: it creates one event, "Lucy test event - safe to delete", on Wednesday 12 June 2030, lists it, edits it (title, moved a day with its length kept, a place), deletes it, and checks each step against the store, printing every question and result. It touches only the event it created, and deletes that event if a step fails. It writes to the real calendar, so it does nothing without `--write`; it does not take the common options.
+
+```
+uv run python checks/calendar_live/calendar_live.py            # prints what it would do
+uv run python checks/calendar_live/calendar_live.py --write [--calendar NAME]
+```
+
+- Needs macOS, full calendar access for the app it runs in, and takes a few seconds.
+- Checks what the fake store cannot: that EventKit keeps the event's identifier after an edit, that the new title, times and place are saved, and that removal works. It does not cover all-day or repeating events.
+
+Not run yet.

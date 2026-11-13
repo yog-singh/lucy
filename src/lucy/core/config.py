@@ -213,27 +213,71 @@ class TimeSettings(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
 
+class CalendarSettings(_ToolOptions):
+    """The calendar tools (`calendar`, `add_calendar_event`, `edit_calendar_event`,
+    `delete_calendar_event`): the macOS calendar store
+    (EventKit), on this machine only. `timeout` bounds one call to the store."""
+
+    calendars: list[str] = Field(default_factory=list)
+    """Names of the calendars the tools read, as the Calendar app shows them; empty: all."""
+    default_calendar: str | None = Field(default=None, min_length=1)
+    """Calendar new events go to when the user names none; None: the system default."""
+    permission_timeout: float = Field(default=60.0, gt=0)
+    """Seconds to wait for the user to answer macOS's calendar permission dialog."""
+
+
+class AddCalendarEventSettings(BaseModel):
+    """The `add_calendar_event` tool. Its options are in `[tools.calendar]`."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+
+class EditCalendarEventSettings(BaseModel):
+    """The `edit_calendar_event` tool (always asks the user first). Its options are in
+    `[tools.calendar]`."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+
+class DeleteCalendarEventSettings(BaseModel):
+    """The `delete_calendar_event` tool (always asks the user first). Its options are in
+    `[tools.calendar]`."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+
 class ToolsSettings(BaseModel):
     """Which tools the chat model may use, and each tool's options.
 
     Nothing is enabled by default, so Lucy makes no network requests unless the
-    user opts in (`time` is the one tool that needs no network). Each name in
+    user opts in (`time` and the calendar tools need no network). Each name in
     `enabled` must be one of the option tables below.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     enabled: list[str] = Field(default_factory=list)
+    confirm_timeout: float = Field(default=60.0, gt=0, le=3600)
+    """Seconds the user has to answer when a tool asks before changing or deleting
+    something (ADR 0006); a later answer runs nothing."""
     wikipedia: WikipediaSettings = Field(default_factory=WikipediaSettings)
     web_search: WebSearchSettings = Field(default_factory=WebSearchSettings)
     fetch_page: FetchPageSettings = Field(default_factory=FetchPageSettings)
     time: TimeSettings = Field(default_factory=TimeSettings)
     weather: WeatherSettings = Field(default_factory=WeatherSettings)
+    calendar: CalendarSettings = Field(default_factory=CalendarSettings)
+    add_calendar_event: AddCalendarEventSettings = Field(default_factory=AddCalendarEventSettings)
+    edit_calendar_event: EditCalendarEventSettings = Field(
+        default_factory=EditCalendarEventSettings
+    )
+    delete_calendar_event: DeleteCalendarEventSettings = Field(
+        default_factory=DeleteCalendarEventSettings
+    )
 
     @classmethod
     def known_tools(cls) -> list[str]:
         """The tool names `enabled` accepts."""
-        return [name for name in cls.model_fields if name != "enabled"]
+        return [name for name in cls.model_fields if name not in ("enabled", "confirm_timeout")]
 
     @model_validator(mode="after")
     def _check_enabled(self) -> Self:

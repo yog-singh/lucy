@@ -12,6 +12,7 @@ dependencies = [
     "parakeet-mlx>=0.7.0",
     "prompt-toolkit>=3.0.43",
     "pydantic>=2.7",
+    "pyobjc-framework-eventkit>=13.0 ; sys_platform == 'darwin'",
     "sounddevice>=0.5",
     "soxr>=1.0",
     "sqlite-vec>=0.1.9",

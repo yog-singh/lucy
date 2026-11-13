@@ -145,6 +145,42 @@ class AssistantMessage(Event):
     interrupted: bool = False
 
 
+class ConfirmationRequested(Event):
+    """A dangerous tool call is waiting for the user's yes (ADR 0006).
+
+    Persisted. `call` is the exact call the model made; only it can run, and only
+    if the user's very next message in this session confirms it before
+    `expires_at`. `question` is the tool's preview, which is what the user was
+    asked (`lucy.core.confirm`).
+    """
+
+    type: Literal["confirmation_requested"] = "confirmation_requested"
+    call: ToolCall
+    question: str
+    expires_at: AwareDatetime
+
+    @field_validator("expires_at")
+    @classmethod
+    def _expiry_to_utc(cls, value: datetime) -> datetime:
+        return value.astimezone(UTC)
+
+
+ConfirmationOutcome = Literal[
+    "confirmed", "declined", "superseded", "expired", "unheard", "changed"
+]
+
+
+class ConfirmationResolved(Event):
+    """What became of a `ConfirmationRequested` (`request_id` is its event id).
+
+    Written before the tool runs, so a crash can lose a run but never repeat one.
+    """
+
+    type: Literal["confirmation_resolved"] = "confirmation_resolved"
+    request_id: str
+    outcome: ConfirmationOutcome
+
+
 class TurnEnded(Event):
     """A turn is over. `error` is set when `reason` is "error"."""
 
@@ -185,6 +221,8 @@ OUTBOUND_EVENTS: tuple[type[Event], ...] = (
     ToolStarted,
     ToolFinished,
     AssistantMessage,
+    ConfirmationRequested,
+    ConfirmationResolved,
     TurnEnded,
 )
 
@@ -199,6 +237,8 @@ AnyEvent = Annotated[
     | ToolStarted
     | ToolFinished
     | AssistantMessage
+    | ConfirmationRequested
+    | ConfirmationResolved
     | TurnEnded,
     Field(discriminator="type"),
 ]
