@@ -60,6 +60,12 @@ uv run python checks/tool_choice/choice.py --turns 3   # smoke run
 
 Baselines: 2026-11-13, 25 and 24 of 25 with the `system` layout, 25 and 25 with `stable_prefix`; 25 of 25 with model unloads forced to happen. Earlier, on 2026-11-12, the GGUF build of the model scored 24 of 25 against 25 of 25 for the MLX build.
 
+## endings
+
+18 turns in one session through the real app (greetings, small talk, a joke, a conversation about space, short facts, thanks, an ambiguous "tell me more about him") that in real use drew closing offers of help and follow-up menus. Classifies the last sentence of each reply with regexes as `offer` (O), `menu` (M, "would you like to know more...", "anything else you'd like to..."), another question (`?`) or no question (`.`); `*` marks turns where a question is fine (greetings, the ambiguous request, the open topic turns). `uv run python checks/endings/endings.py` (about 1 minute; database in `data/checks/endings/LABEL/`). The regexes are rough: read the replies, not only the counts.
+
+Baselines: 2026-11-14, before the persona's passage on how a reply ends, offer 6 and menu 6 of 36 replies (two runs); after it, offer 3 and menu 5 of 54 (three runs), with no menus after factual answers.
+
 ## extract_eval
 
 Feeds scripted user turns with invented people and details through the real extraction and reconciliation pipeline (the config's `extraction` role and `[embedder]`) into a fresh database, then scores what was stored against expected statements, turns that must store nothing, and (scenario B) end-state checks such as superseded facts.
