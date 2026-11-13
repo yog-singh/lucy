@@ -5,7 +5,10 @@ port registry: `CATALOGUE` maps each tool name to a factory taking the settings
 (and, for tests, an HTTP transport). `build_tools` builds the tools listed in
 `[tools] enabled`, in that order. Tools that hold an HTTP client have an
 `aclose()` method; the app calls it on stop. The `time` tool needs no network:
-it reads the system's time-zone database.
+it reads the system's time-zone database. The calendar tools (`calendar`,
+`add_calendar_event`, `edit_calendar_event`, `delete_calendar_event`; the last two
+always ask the user first) need none either: they use the macOS calendar store, and
+load EventKit only on their first call.
 
 Every name in the catalogue has an options table in `ToolsSettings`
 (`lucy.core.config`), which is where unknown names and missing options are
@@ -22,6 +25,8 @@ import httpx
 
 from lucy.core.config import Settings
 from lucy.core.ports import Tool
+from lucy.tools.calendar_changes import DeleteCalendarEventTool, EditCalendarEventTool
+from lucy.tools.calendar_events import AddCalendarEventTool, CalendarTool
 from lucy.tools.fetch_page import FetchPageTool
 from lucy.tools.local_time import TimeTool
 from lucy.tools.netguard import Resolver, system_resolver
@@ -45,6 +50,16 @@ CATALOGUE: Final[dict[str, Factory]] = {
     "time": lambda _s, _transport, _resolver, clock: TimeTool(clock=clock),
     "weather": lambda s, transport, _resolver, _clock: WeatherTool(
         s.tools.weather, transport=transport
+    ),
+    "calendar": lambda s, _transport, _resolver, clock: CalendarTool(s.tools.calendar, clock=clock),
+    "add_calendar_event": lambda s, _transport, _resolver, clock: AddCalendarEventTool(
+        s.tools.calendar, clock=clock
+    ),
+    "edit_calendar_event": lambda s, _transport, _resolver, clock: EditCalendarEventTool(
+        s.tools.calendar, clock=clock
+    ),
+    "delete_calendar_event": lambda s, _transport, _resolver, clock: DeleteCalendarEventTool(
+        s.tools.calendar, clock=clock
     ),
 }
 

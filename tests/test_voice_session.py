@@ -13,6 +13,7 @@ from lucy.core.bus import EventBus
 from lucy.core.context import ContextBuilder
 from lucy.core.events import (
     AssistantMessage,
+    ConfirmationResolved,
     Event,
     Interrupt,
     PlaybackInterrupted,
@@ -25,10 +26,13 @@ from lucy.core.gateway import LLMGateway
 from lucy.core.history import events_to_messages
 from lucy.core.orchestrator import Orchestrator
 from lucy.core.types import AudioChunk, FinishReason, LLMChunk, Role, ToolCall
+from lucy.tools.calendar_changes import DeleteCalendarEventTool
+from lucy.tools.calendar_events import event_id
 from lucy.voice.audio import FileAudioIO
 from lucy.voice.session import NullUI, VoiceConfig, VoiceSession, VoiceState
 from lucy.voice.vad import ScriptedVAD
 from tests.fakes import EchoTool, FakeLLM, InMemoryMemoryStore, Pause, Raise, Script
+from tests.test_tools_calendar import EVENTS, LONDON, NOW, FakeStore
 from tests.voice_fakes import FakeSTT, FakeTTS, concat, silence, tone
 
 TIMEOUT = 10
@@ -569,3 +573,22 @@ async def test_speech_activity_returns_to_idle_after_an_empty_transcript() -> No
         seen = h.bus.subscribe(SpeechActivity)
         await h.run()
     assert [e.state for e in drain(seen)] == ["idle", "speaking", "transcribing", "idle", "ended"]
+
+
+# --- Confirmation by voice -----------------------------------------------------------
+
+
+async def test_a_spoken_yes_confirms_a_calendar_delete() -> None:
+    dentist = EVENTS[0]
+    store = FakeStore(EVENTS)
+    tool = DeleteCalendarEventTool(store=store, clock=lambda: NOW, local_zone=LONDON)
+    question = (await tool.preview({"id": event_id(dentist)})).content
+    call = ToolCall(id="c1", name=tool.name, arguments={"id": event_id(dentist)})
+    script = [[LLMChunk(tool_call=call), LLMChunk(finish_reason=FinishReason.TOOL_CALLS)]]
+    audio = [concat(silence(0.5), tone(1.0), silence(12.0), tone(0.5), silence(3.0))]
+    transcripts = ["Delete the dentist.", "Yes."]
+    async with Harness(audio, [*script, reply("Done.")], transcripts, tools=[tool]) as h:
+        await h.run()
+    assert h.tts.started[0] == question  # the question is spoken verbatim
+    assert [e.outcome for e in h.events(ConfirmationResolved)] == ["confirmed"]
+    assert dentist not in store.stored

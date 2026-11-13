@@ -2,6 +2,10 @@
 
 Dated notes on what was built, what failed and what changed. Newest first.
 
+## 2026-11-14: confirming dangerous tools
+
+- Confirmation flow for dangerous tools built by a sub-agent (amendment to ADR 0006): the question is the tool's preview, spoken by code; only the next plain yes runs the logged call, decided without the model. No real tool uses it yet. Not yet committed.
+
 ## 2026-11-13: prompt layout and model residency
 
 - Decided by the user: keep `gemma4:12b-mlx`, make the reordered prompt layout the default, and bound the model's memory by unloading when idle. Implemented by a sub-agent; recorded in ADR 0017 and amendments to ADRs 0004 and 0005. 1591 tests pass. Not yet committed.

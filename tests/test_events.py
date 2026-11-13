@@ -9,6 +9,8 @@ from lucy.core.events import (
     OUTBOUND_EVENTS,
     AssistantMessage,
     ClientConnected,
+    ConfirmationRequested,
+    ConfirmationResolved,
     Event,
     Interrupt,
     PlaybackInterrupted,
@@ -45,6 +47,14 @@ SAMPLES: list[Event] = [
         tool_calls=[ToolCall(id="c2", name="echo", arguments={"text": "y"})],
         interrupted=True,
     ),
+    ConfirmationRequested(
+        session_id="s",
+        turn_id="t1",
+        call=ToolCall(id="c3", name="delete_event", arguments={"title": "Dentist"}),
+        question="Delete 'Dentist'?",
+        expires_at=datetime(2026, 11, 14, 12, 1, tzinfo=UTC),
+    ),
+    ConfirmationResolved(session_id="s", turn_id="t2", request_id="r1", outcome="declined"),
     TurnEnded(session_id="s", turn_id="t1", reason="error", error="boom"),
 ]
 

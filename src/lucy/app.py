@@ -82,7 +82,7 @@ from lucy.core.ports import STT, TTS, Embedder, MemoryStore, Tool, TraceSink
 from lucy.core.registry import Registry
 from lucy.core.residency import Residency
 from lucy.core.trace import TurnTrace
-from lucy.core.types import MemoryContext
+from lucy.core.types import MemoryContext, Risk
 from lucy.memory.decay import DecayPolicy
 from lucy.memory.extraction import (
     DEFAULT_TRANSIENT_ERRORS,
@@ -148,9 +148,10 @@ TRANSIENT_JOB_ERRORS: Final = (*DEFAULT_TRANSIENT_ERRORS, LLMError, EmbedderErro
 
 
 _NAMED_TOOL: Final = re.compile(r"\bthe (\w+) tool\b")
+_ABOUT_CONFIRMING: Final = re.compile(r"\bask the user for confirmation themselves\b")
 
 
-def system_prompt(tools: bool | Collection[str]) -> str:
+def system_prompt(tools: bool | Collection[str], *, confirming: bool | None = None) -> str:
     """The fixed part of the system prompt: the persona, plus the tool guidance
     (`prompts/tools.md`) when any tool is enabled.
 
@@ -158,6 +159,10 @@ def system_prompt(tools: bool | Collection[str]) -> str:
     guidance sentence about "the weather tool" (any "the NAME tool") is left out when
     that tool is not enabled. Measured: with the weather sentence present but the tool
     disabled, the model called a `weather` tool it was not offered.
+
+    `confirming` is whether any enabled tool asks the user before it runs
+    (`Risk.DANGEROUS`, ADR 0006); the sentence about such tools is left out when
+    not. It defaults to true when `tools` is True and false for a list of names.
     """
     persona = load_prompt("persona").strip()
     if not tools:
@@ -166,7 +171,11 @@ def system_prompt(tools: bool | Collection[str]) -> str:
     if not isinstance(tools, bool):
         enabled = set(tools)
 
+        asks = bool(confirming)
+
         def keep(sentence: str) -> bool:
+            if not asks and _ABOUT_CONFIRMING.search(sentence):
+                return False
             return all(name in enabled for name in _NAMED_TOOL.findall(sentence))
 
         paragraphs = [
@@ -462,7 +471,10 @@ class LucyApp:
             self._tools = list(self._tool_builder(self.settings))
             clock = self._clock
             context = ContextBuilder(
-                system_prompt([t.name for t in self._tools]),
+                system_prompt(
+                    [t.name for t in self._tools],
+                    confirming=any(t.risk == Risk.DANGEROUS for t in self._tools),
+                ),
                 clock=lambda: clock().astimezone(),
                 layout=self.settings.context.layout,
             )
@@ -473,6 +485,7 @@ class LucyApp:
                 context=context,
                 tools=self._tools,
                 trace=trace,
+                confirm_timeout=self.settings.tools.confirm_timeout,
             )
             self._run_task = asyncio.create_task(self._orchestrator.run(), name="lucy-orchestrator")
             self._start_residency(self._orchestrator)

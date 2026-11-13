@@ -15,7 +15,7 @@ Voice works in its first stage: `lucy voice` listens through the microphone and 
 Not built yet:
 
 - Voice stages 2 and 3: interrupting Lucy by speaking (barge-in, with echo cancellation) and a wake word.
-- Tools that act (home control) and the confirmation flow for dangerous ones; the internet lookup tools below are built.
+- Tools that act on the home; the lookup tools, the calendar tools below and the confirmation flow for dangerous tools are built.
 - Telling Lucy in conversation to forget or correct something (use `lucy memory forget` and `lucy memory correct`).
 - Lucy asking the user to confirm an inference before acting on it.
 
@@ -131,7 +131,7 @@ Run `lucy memory work`, `correct`, `forget` and `rebuild` while `lucy chat` is n
 
 ## Tools
 
-Lucy can look things up to ground her answers. Five read-only tools exist:
+Lucy can look things up to ground her answers, and use your calendar. Five read-only lookup tools exist:
 
 - `wikipedia`: searches Wikipedia (in the language set under `[tools.wikipedia]`) and returns the best matching article's introduction and the titles of other matches. A name with several meanings is flagged as ambiguous.
 - `web_search`: queries your own [SearXNG](https://docs.searxng.org/) instance and returns the top results with title, address, snippet and date when there is one. With `recent` set, the model asks for news articles only (SearXNG's news category).
@@ -152,6 +152,14 @@ searxng_url = "http://127.0.0.1:8890"
 Enabling the network tools sends data off this machine: the search query goes to Wikipedia, or to your SearXNG instance and from there to the search engines it queries; `fetch_page` requests the page address the model chose from that site; `weather` sends the place name to Open-Meteo's geocoding service and the place's coordinates, rounded to two decimals (about a kilometre), to its forecast service. `time` sends nothing. Requests carry a generic `User-Agent` and nothing about you. `weather` never guesses where you are: for "around me" Lucy passes the place she knows you live in, or asks. `deploy/searxng/` runs a private SearXNG on `127.0.0.1:8890` with Docker; its README explains how to start, test, update and stop it. When tools are enabled, the system prompt gets a short guide on when to use them (`src/lucy/prompts/tools.md`), and `lucy chat` shows what is being looked up while a tool runs, such as `[looking up "Mount Kilimanjaro" on wikipedia]` or `[checking the weather in Porto]`. Every result is capped at about 6,000 characters (`max_chars`), and each network call is limited to 10 seconds (`timeout`).
 
 `fetch_page` treats page content as untrusted. It fetches only `http` and `https` addresses without a user name or password. The host must resolve only to public IP addresses: loopback, private, link-local and other internal ranges are refused for IPv4 and IPv6, and so are names like `localhost`. The tool connects to the address it checked and checks every redirect again. Bodies are limited in size (2 MB, enforced while downloading), in type (text only) and in time. To let it reach a host on your network, such as a local Home Assistant, add the host to `allow_private_hosts` under `[tools.fetch_page]`.
+
+Four calendar tools use the calendars in the Mac's Calendar app, through macOS's calendar store (EventKit), on macOS only:
+
+- `calendar` (read): lists events for a day, a part of a day or a range ("friday afternoon", "next week", "now" for upcoming events), optionally filtered by words, with free time when one day is asked for. Each event has a short id, which the edit and delete tools take.
+- `add_calendar_event` (act tier: it runs without asking for confirmation): adds an event with a title, a start, an end or length (one hour by default), and optionally all-day, a place, notes and a calendar.
+- `edit_calendar_event` and `delete_calendar_event` (dangerous: they always ask first): change an event's title, time (moving the start keeps its length), place or notes, or delete it. Lucy asks a question naming the event and every change in absolute dates ("Move 'Dentist' from Tuesday 17 November 2026, 15:00 to 16:00, to Wednesday 18 November 2026, 10:00 to 11:00?") and acts only on a plain yes, and only if the question would still be the same. For a repeating event they act on that one occurrence, never the series. Events in read-only calendars and invitations from others are refused.
+
+Dates are worked out in code, not by the model: the tools accept ISO dates and times and a small set of the user's own words ("today", "tomorrow", weekdays, "this week", "next week", "20 November", with a time such as "3pm" or a part of the day), refuse ambiguous ones such as "next friday" with the dates it could mean, and every result states the dates with their weekdays. Enable them with `enabled = [..., "calendar", "add_calendar_event", "edit_calendar_event", "delete_calendar_event"]` (any subset); `[tools.calendar]` chooses which calendars are read and where new events go. Nothing leaves the machine. The first call makes macOS ask once whether the app Lucy runs in may use your calendars; if access was refused, allow it in System Settings > Privacy & Security > Calendars. See [ADR 0019](docs/adr/0019-calendar-tools.md).
 
 ## Memory eval
 

@@ -9,6 +9,8 @@ from lucy.core.context import ContextBuilder
 from lucy.core.events import (
     OUTBOUND_EVENTS,
     AssistantMessage,
+    ConfirmationRequested,
+    ConfirmationResolved,
     Event,
     Interrupt,
     PlaybackInterrupted,
@@ -73,6 +75,22 @@ class RecordingTool:
         return ToolOutput(content=f"{self.name} done")
 
 
+class ConfirmingTool(RecordingTool):
+    """A dangerous tool whose preview asks `question` (formatted with the arguments)."""
+
+    def __init__(self, name: str = "delete_event", question: str = "Run {name}?") -> None:
+        super().__init__(name, Risk.DANGEROUS)
+        self.question = question
+        self.preview_error: Exception | None = None
+        self.previews: list[dict[str, Any]] = []
+
+    async def preview(self, args: dict[str, Any]) -> ToolOutput:
+        self.previews.append(args)
+        if self.preview_error is not None:
+            raise self.preview_error
+        return ToolOutput(content=self.question.format(name=self.name, **args))
+
+
 class Harness:
     """An orchestrator on a bus with a recorder of every outbound event."""
 
@@ -84,6 +102,7 @@ class Harness:
         max_steps: int = 8,
         memory: InMemoryMemoryStore | None = None,
         trace: Any = None,
+        confirm_timeout: float = 60.0,
     ) -> None:
         self.bus = EventBus()
         self.out = self.bus.subscribe(*OUTBOUND_EVENTS)
@@ -98,6 +117,7 @@ class Harness:
             tools=tools,
             trace=self.trace,
             max_steps=max_steps,
+            confirm_timeout=confirm_timeout,
         )
         self.task: asyncio.Task[None] | None = None
 
@@ -143,6 +163,10 @@ def summary(event: Event) -> tuple[str, ...]:
             return (event.type, r.content, "error" if r.is_error else "ok")
         case TurnEnded(reason=r, error=e):
             return (event.type, r, e or "")
+        case ConfirmationRequested(call=c, question=q):
+            return (event.type, c.name, q)
+        case ConfirmationResolved(outcome=o):
+            return (event.type, o)
     raise AssertionError(event)
 
 
@@ -227,21 +251,20 @@ async def test_raising_tool_gives_error_result() -> None:
     assert isinstance(events[-1], TurnEnded) and events[-1].reason == "completed"
 
 
-async def test_act_tool_runs_and_dangerous_tool_does_not() -> None:
+async def test_act_tool_runs_and_dangerous_tool_waits_for_confirmation() -> None:
     act = RecordingTool("lights", Risk.ACT)
-    danger = RecordingTool("delete_all", Risk.DANGEROUS)
-    script = [
-        calls(ToolCall(id="c1", name="lights"), ToolCall(id="c2", name="delete_all")),
-        text("Done."),
-    ]
+    danger = ConfirmingTool("delete_all")
+    script = [calls(ToolCall(id="c1", name="lights"), ToolCall(id="c2", name="delete_all"))]
     async with Harness(script, tools=[act, danger]) as h:
         await h.say("lights off and delete everything")
         events = await h.until_turns_end()
     results = [e.result for e in events if isinstance(e, ToolFinished)]
     assert act.runs == [{}] and danger.runs == []
     assert results[0].content == "lights done" and not results[0].is_error
-    assert results[1].is_error and "confirmation" in results[1].content
-    assert results[1].call_id == "c2"
+    assert results[1].call_id == "c2" and results[1].content.startswith("Not run yet.")
+    # The question is the reply; the model is not called again.
+    assert len(h.llm.calls) == 1
+    assert summary(events[-2]) == ("assistant_message", "Run delete_all?", "", "")
 
 
 async def test_step_limit_ends_turn_with_error() -> None:

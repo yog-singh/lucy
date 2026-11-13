@@ -163,6 +163,26 @@ class Tool(Protocol):
 
 
 @runtime_checkable
+class ConfirmableTool(Tool, Protocol):
+    """A tool that can describe a call before running it. Every `Risk.DANGEROUS`
+    tool must be one: the orchestrator asks the user `preview(args).content` and
+    runs the call only on a yes (ADR 0006).
+
+    `preview` must have no side effects. Its content is the question put to the
+    user, naming the real target the call would act on as resolved now (e.g.
+    "Delete 'Dentist' on Tuesday 17 November at 15:00?"), not the raw arguments.
+    It must be deterministic for an unchanged target: the orchestrator previews
+    again just before running and refuses to run if the text differs. An error
+    output (or an exception) means the call cannot be asked about; the error is
+    given to the model and nothing is asked.
+    """
+
+    async def preview(self, args: dict[str, Any]) -> ToolOutput:
+        """Describe, as a question to the user, what `run(args)` would do."""
+        ...
+
+
+@runtime_checkable
 class TraceSink(Protocol):
     """Stores one trace per turn, so "why did she say that?" can be answered (ADR 0004)."""
 

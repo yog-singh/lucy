@@ -16,14 +16,18 @@ from collections import deque
 from collections.abc import Sequence
 from contextlib import aclosing
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
-from typing import Literal
+from datetime import UTC, datetime, timedelta
+from typing import Literal, cast
 
 from lucy.core.bus import EventBus
+from lucy.core.confirm import outcome_for, pending_confirmation
 from lucy.core.context import ContextBuilder, SectionReport
 from lucy.core.events import (
     AnyEvent,
     AssistantMessage,
+    ConfirmationOutcome,
+    ConfirmationRequested,
+    ConfirmationResolved,
     Event,
     Interrupt,
     PlaybackInterrupted,
@@ -36,7 +40,7 @@ from lucy.core.events import (
 )
 from lucy.core.gateway import LLMGateway, Priority
 from lucy.core.history import events_to_messages, tool_message
-from lucy.core.ports import MemoryStore, Tool, TraceSink, tool_spec
+from lucy.core.ports import ConfirmableTool, MemoryStore, Tool, TraceSink, tool_spec
 from lucy.core.sentences import SentenceSplitter
 from lucy.core.trace import StepTrace, TurnTrace
 from lucy.core.types import (
@@ -46,12 +50,25 @@ from lucy.core.types import (
     Risk,
     Role,
     ToolCall,
+    ToolOutput,
     ToolResult,
 )
 
 logger = logging.getLogger(__name__)
 
 Outcome = Literal["completed", "interrupted", "error"]
+
+NOT_RUN: dict[ConfirmationOutcome, str] = {
+    "declined": "Not run: the user said no.",
+    "superseded": (
+        "Not run: the user did not confirm and said something else; the request is "
+        "cancelled. If they still want it, call the tool again and they will be asked again."
+    ),
+    "expired": "Not run: the confirmation expired.",
+    "unheard": "Not run: the question was cut off before the user heard it.",
+    "changed": "Not run: it changed since the user was asked.",
+}
+"""The tool result given to the model when a confirmation ends without a run."""
 
 
 def _now() -> datetime:
@@ -125,6 +142,15 @@ class Orchestrator:
     An `Interrupt` cancels the session's turn only once that turn has started
     running; an `Interrupt` that arrives while no turn of the session is running
     is ignored, and queued turns still run afterwards.
+
+    Dangerous tools (ADR 0006) are never run on the model's say-so. A dangerous
+    call is turned into a persisted `ConfirmationRequested` holding the exact
+    call, and the tool's preview is put to the user as the turn's reply, by code.
+    The session's very next typed or spoken message answers it, within
+    `confirm_timeout` seconds: before any LLM call of that turn, plain code
+    (`lucy.core.confirm`) decides, logs a `ConfirmationResolved`, and on a yes
+    runs the call from the log. The model then sees the outcome as the result of
+    a tool call and writes the reply.
     """
 
     def __init__(
@@ -139,9 +165,12 @@ class Orchestrator:
         chat_role: str = "chat",
         max_steps: int = 8,
         history_limit: int = 200,
+        confirm_timeout: float = 60.0,
     ) -> None:
         if max_steps < 1:
             raise ValueError("max_steps must be at least 1")
+        if confirm_timeout <= 0:
+            raise ValueError("confirm_timeout must be positive")
         self._bus = bus
         self._gateway = gateway
         self._memory = memory
@@ -150,12 +179,15 @@ class Orchestrator:
         for tool in tools:
             if tool.name in self._tools:
                 raise ValueError(f"duplicate tool name {tool.name!r}")
+            if tool.risk == Risk.DANGEROUS and not callable(getattr(tool, "preview", None)):
+                raise ValueError(f"dangerous tool {tool.name!r} has no preview to confirm with")
             self._tools[tool.name] = tool
         self._tool_specs = [tool_spec(tool) for tool in tools]
         self._trace = trace
         self._chat_role = chat_role
         self._max_steps = max_steps
         self._history_limit = history_limit
+        self._confirm_timeout = timedelta(seconds=confirm_timeout)
         self._sessions: dict[str, _Session] = {}
         self._running = False
         self._subscription = bus.subscribe(UserMessage, Interrupt, PlaybackInterrupted)
@@ -274,13 +306,16 @@ class Orchestrator:
         await self._memory.append_episode(message.model_copy(update={"turn_id": turn.turn_id}))
 
         episodes = await self._memory.recent_episodes(turn.session_id, self._history_limit)
+        # Decided before any LLM call, from the log alone (ADR 0006).
+        request = pending_confirmation(episodes, message)
+        answered = await self._resolve(turn, request, episodes, message) if request else []
         history = events_to_messages(episodes)
         window = self._gateway.for_role(self._chat_role).capabilities.context_window
         budget = self._context.token_budgets(window)["memories"]
         memory = await self._memory.retrieve(query=message.text, budget=budget)
         built = self._context.build(memory=memory, history=history, context_window=window)
         turn.context = built.report
-        messages = list(built.messages)
+        messages = [*built.messages, *answered]
 
         for step_number in range(1, self._max_steps + 1):
             text, calls = await self._run_step(turn, messages)
@@ -292,11 +327,26 @@ class Orchestrator:
                 # rebuilding history drops them as unanswered.
                 break
             messages.append(Message(role=Role.ASSISTANT, content=text, tool_calls=calls))
+            question: str | None = None
+            waiting_for = ""
             for call in calls:
-                await self._emit(ToolStarted(**self._ids(turn), call=call))
-                result = await self._run_tool(call)
+                tool = self._tools.get(call.name)
+                if question is not None:
+                    content = f"Not run: waiting for the user's confirmation of {waiting_for}."
+                    result = ToolResult(call_id=call.id, content=content, is_error=True)
+                elif tool is not None and tool.risk == Risk.DANGEROUS:
+                    result, question = await self._request_confirmation(turn, call, tool)
+                    waiting_for = call.name
+                else:
+                    await self._emit(ToolStarted(**self._ids(turn), call=call))
+                    result = await self._run_tool(call)
                 await self._emit(ToolFinished(**self._ids(turn), result=result))
                 messages.append(tool_message(result))
+            if question is not None:
+                # The question is the reply; the model does not get to word it or act on.
+                await self._say(turn, question)
+                await self._emit(TurnEnded(**self._ids(turn), reason="completed"))
+                return "completed", None
 
         error = f"step limit of {self._max_steps} LLM calls reached without a final answer"
         await self._emit(TurnEnded(**self._ids(turn), reason="error", error=error))
@@ -333,18 +383,16 @@ class Orchestrator:
         return step.text, calls
 
     async def _run_tool(self, call: ToolCall) -> ToolResult:
-        """Run one tool call, enforcing its risk tier; failures become error results."""
+        """Run one tool call; failures become error results.
+
+        The caller enforces the risk tier: a dangerous call reaches this only
+        once the user has confirmed it (`_resolve`).
+        """
         tool = self._tools.get(call.name)
         if tool is None:
             return ToolResult(
                 call_id=call.id, content=f"Unknown tool {call.name!r}.", is_error=True
             )
-        if tool.risk == Risk.DANGEROUS:
-            content = (
-                f"Tool {call.name!r} needs the user's confirmation, which is not available "
-                "yet, so it was not run."
-            )
-            return ToolResult(call_id=call.id, content=content, is_error=True)
         try:
             output = await tool.run(dict(call.arguments))
         except Exception as exc:
@@ -352,6 +400,80 @@ class Orchestrator:
             content = f"Tool {call.name!r} failed: {_describe(exc)}"
             return ToolResult(call_id=call.id, content=content, is_error=True)
         return ToolResult(call_id=call.id, content=output.content, is_error=output.is_error)
+
+    # --- Confirmation (ADR 0006) ------------------------------------------------
+
+    async def _preview(self, call: ToolCall, tool: Tool) -> ToolOutput:
+        """The tool's preview of `call`; a failure becomes an error output."""
+        try:
+            return await cast(ConfirmableTool, tool).preview(dict(call.arguments))
+        except Exception as exc:
+            logger.warning("preview of %s failed: %s", call.name, _describe(exc))
+            return ToolOutput(content=f"Tool {call.name!r} failed: {_describe(exc)}", is_error=True)
+
+    async def _request_confirmation(
+        self, turn: _Turn, call: ToolCall, tool: Tool
+    ) -> tuple[ToolResult, str | None]:
+        """Log a request to confirm `call`. Returns the call's result for the model and
+        the question to put to the user (None if the call cannot be previewed)."""
+        preview = await self._preview(call, tool)
+        if preview.is_error:
+            return ToolResult(call_id=call.id, content=preview.content, is_error=True), None
+        question = preview.content
+        await self._emit(
+            ConfirmationRequested(
+                **self._ids(turn),
+                call=call,
+                question=question,
+                expires_at=_now() + self._confirm_timeout,
+            )
+        )
+        content = f"Not run yet. The user is being asked: {question}"
+        return ToolResult(call_id=call.id, content=content), question
+
+    async def _say(self, turn: _Turn, text: str) -> None:
+        """Deliver code-authored `text` exactly as a model reply is delivered."""
+        await self._publish(TextDelta(**self._ids(turn), text=text))
+        splitter = SentenceSplitter()
+        for sentence in [*splitter.feed(text), *splitter.flush()]:
+            await self._publish(SentenceReady(**self._ids(turn), text=sentence))
+        await self._emit(AssistantMessage(**self._ids(turn), text=text))
+
+    async def _resolve(
+        self,
+        turn: _Turn,
+        request: ConfirmationRequested,
+        episodes: Sequence[AnyEvent],
+        message: UserMessage,
+    ) -> list[Message]:
+        """Answer the pending `request` with `message`; on a yes, run the logged call.
+
+        Returns the messages to add after the user's message: a code-authored
+        assistant tool call (the logged call under a fresh id) and its result.
+        """
+        outcome = outcome_for(request, episodes, message)
+        tool = self._tools.get(request.call.name)
+        if outcome == "confirmed":
+            # The target must still be the one the user was asked about.
+            if tool is None:
+                outcome = "changed"
+            else:
+                again = await self._preview(request.call, tool)
+                if again.is_error or again.content != request.question:
+                    outcome = "changed"
+        # Logged before anything runs: a crash can lose the run but never repeat it.
+        await self._emit(
+            ConfirmationResolved(**self._ids(turn), request_id=request.id, outcome=outcome)
+        )
+        call = request.call.model_copy(update={"id": str(uuid.uuid4())})
+        await self._emit(AssistantMessage(**self._ids(turn), tool_calls=[call]))
+        if outcome == "confirmed":
+            await self._emit(ToolStarted(**self._ids(turn), call=call))
+            result = await self._run_tool(call)
+        else:
+            result = ToolResult(call_id=call.id, content=NOT_RUN[outcome], is_error=True)
+        await self._emit(ToolFinished(**self._ids(turn), result=result))
+        return [Message(role=Role.ASSISTANT, content="", tool_calls=[call]), tool_message(result)]
 
     # --- Endings --------------------------------------------------------------
 

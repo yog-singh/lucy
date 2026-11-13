@@ -165,6 +165,20 @@ max_statements         = 8
 # To opt in, uncomment:
 # enabled = ["wikipedia", "web_search", "fetch_page", "time", "weather"]
 #
+# The calendar tools read (`calendar`), add to (`add_calendar_event`), change
+# (`edit_calendar_event`) and delete from (`delete_calendar_event`) the
+# calendars in this Mac's Calendar app, through macOS's calendar store
+# (EventKit); see [tools.calendar]. Nothing leaves this machine. The edit and
+# delete tools always ask for confirmation first, and act on one occurrence of
+# a repeating event, never the series. To add them as well:
+# enabled = ["wikipedia", "web_search", "fetch_page", "time", "weather", "calendar", "add_calendar_event", "edit_calendar_event", "delete_calendar_event"]
+#
+# Tools that change or delete things ask the user first, in Lucy's voice, and
+# run only if the very next thing the user says is a plain yes ("yes", "go
+# ahead"; not "ok"). `confirm_timeout` is how many seconds that answer may take
+# (default 60); a later answer runs nothing.
+# confirm_timeout = 60
+#
 # Every internet tool also takes `max_chars` (longest result given to the
 # model, default 6000) and `timeout` (seconds per call, default 10).
 
@@ -193,6 +207,20 @@ max_redirects       = 5
 [tools.weather]
 # "metric" (°C, km/h, mm) or "imperial" (°F, mph, inches).
 units = "metric"
+
+[tools.calendar]
+# Used by all the calendar tools; macOS only. Nothing leaves this machine: events
+# are read from and added to the Calendar app's store directly (including
+# calendars it syncs, such as iCloud or Google, which then sync as usual).
+# The first time a calendar tool runs, macOS asks once whether the app Lucy
+# runs in (Terminal, iTerm, ...) may use your calendars; choose Allow Full
+# Access. To change it later: System Settings > Privacy & Security > Calendars.
+# Calendars to read, by the names the Calendar app shows; empty means all.
+calendars = []
+# Calendar new events go to when you name none; leave unset for the Calendar
+# app's default. e.g. default_calendar = "Home"
+# Seconds to wait for you to answer macOS's permission dialog.
+permission_timeout = 60
 
 [context]
 # Optional; this is the default. How the chat prompt is arranged.
