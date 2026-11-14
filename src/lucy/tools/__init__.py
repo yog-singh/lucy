@@ -61,9 +61,11 @@ CATALOGUE: Final[dict[str, Factory]] = {
     "weather": lambda s, transport, _resolver, _clock: WeatherTool(
         s.tools.weather, transport=transport
     ),
-    "calendar": lambda s, _transport, _resolver, clock: CalendarTool(s.tools.calendar, clock=clock),
+    "calendar": lambda s, _transport, _resolver, clock: CalendarTool(
+        s.tools.calendar, clock=clock, changes_enabled=_changes_enabled(s)
+    ),
     "add_calendar_event": lambda s, _transport, _resolver, clock: AddCalendarEventTool(
-        s.tools.calendar, clock=clock
+        s.tools.calendar, clock=clock, changes_enabled=_changes_enabled(s)
     ),
     "edit_calendar_event": lambda s, _transport, _resolver, clock: EditCalendarEventTool(
         s.tools.calendar, clock=clock
@@ -84,6 +86,11 @@ CATALOGUE: Final[dict[str, Factory]] = {
         s.tools.reminders, store=build_store(s, clock), clock=clock
     ),
 }
+
+
+def _changes_enabled(settings: Settings) -> bool:
+    """Whether an edit or delete calendar tool is offered, so calendar results say so."""
+    return bool({"edit_calendar_event", "delete_calendar_event"} & set(settings.tools.enabled))
 
 
 def build_tools(

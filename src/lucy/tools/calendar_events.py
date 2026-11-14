@@ -115,6 +115,15 @@ def access_problem(access: Access) -> str:
     }.get(access, "Lucy cannot use the calendar.")
 
 
+CHANGE_HINT = (
+    "To edit or delete an event, call that tool with its id straight away: the tool "
+    "itself asks the user to confirm, so do not ask them first."
+)
+"""Closes calendar results when an edit or delete tool is offered. Gemma follows an
+instruction in a tool result more readily than one in a description (ADR 0013); without
+it, it asked its own "are you sure?" before the tool's confirmation."""
+
+
 class _CalendarBase:
     """What both calendar tools share: the store, the clock, access and threading."""
 
@@ -125,8 +134,12 @@ class _CalendarBase:
         store: CalendarStore | None = None,
         clock: Callable[[], datetime] | None = None,
         local_zone: tzinfo | None = None,
+        changes_enabled: bool = False,
     ) -> None:
+        """`changes_enabled` (an edit or delete tool is offered too) adds `CHANGE_HINT`
+        to each result."""
         self.settings = settings or CalendarSettings()
+        self._changes_enabled = changes_enabled
         self._zone = local_zone or system_zone()
         self._store = store or shared_store(self._zone)
         self._clock = clock or (lambda: datetime.now(UTC))
@@ -264,6 +277,8 @@ class CalendarTool(_CalendarBase):
         free = None if (query or upcoming) else _free_time(found, first, last, self._zone)
         if free:
             lines.append(free)
+        if found and self._changes_enabled:
+            lines.append(CHANGE_HINT)
         return ToolOutput(content=cap("\n".join(lines), self.settings.max_chars))
 
 
@@ -468,6 +483,8 @@ class AddCalendarEventTool(_CalendarBase):
                 + "."
             )
         lines.append(f"Event id: {event_id(saved)}.")
+        if self._changes_enabled:
+            lines.append(CHANGE_HINT)
         return ToolOutput(content=cap(" ".join(lines), self.settings.max_chars))
 
     async def _target_calendar(self, asked: str | None) -> str | ToolOutput:
