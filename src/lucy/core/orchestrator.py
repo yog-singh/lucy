@@ -13,14 +13,14 @@ import asyncio
 import logging
 import uuid
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import aclosing
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Literal, cast
+from typing import Final, Literal, cast
 
 from lucy.core.bus import EventBus
-from lucy.core.confirm import outcome_for, pending_confirmation
+from lucy.core.confirm import outcome_for, pending_confirmation, unresolved_request
 from lucy.core.context import ContextBuilder, SectionReport
 from lucy.core.events import (
     AnyEvent,
@@ -33,6 +33,7 @@ from lucy.core.events import (
     PlaybackInterrupted,
     SentenceReady,
     TextDelta,
+    TimerFired,
     ToolFinished,
     ToolStarted,
     TurnEnded,
@@ -41,6 +42,7 @@ from lucy.core.events import (
 from lucy.core.gateway import LLMGateway, Priority
 from lucy.core.history import events_to_messages, tool_message
 from lucy.core.ports import ConfirmableTool, MemoryStore, Tool, TraceSink, tool_spec
+from lucy.core.reminders import TimerHandler
 from lucy.core.sentences import SentenceSplitter
 from lucy.core.trace import StepTrace, TurnTrace
 from lucy.core.types import (
@@ -70,6 +72,9 @@ NOT_RUN: dict[ConfirmationOutcome, str] = {
 }
 """The tool result given to the model when a confirmation ends without a run."""
 
+NOT_MADE: Final = "The change I asked about was not made; ask again if you still want it."
+"""Added to a proactive turn's words when it ends an unanswered confirmation request."""
+
 
 def _now() -> datetime:
     return datetime.now(UTC)
@@ -83,7 +88,7 @@ def _describe(exc: BaseException) -> str:
 class _Session:
     """Per-session scheduling state. Exists only while the session has work."""
 
-    pending: deque[UserMessage] = field(default_factory=deque)
+    pending: deque[UserMessage | TimerFired] = field(default_factory=deque)
     worker: asyncio.Task[None] | None = None
     turn: asyncio.Task[None] | None = None
     turn_started: bool = False
@@ -151,6 +156,14 @@ class Orchestrator:
     (`lucy.core.confirm`) decides, logs a `ConfirmationResolved`, and on a yes
     runs the call from the log. The model then sees the outcome as the result of
     a tool call and writes the reply.
+
+    Proactive turns (ADR 0020): a `TimerFired` (published by a client, from
+    `ReminderService.fire`) is queued like a user message and runs a turn with
+    no model call. The handler in `timer_handlers` for its `name` says what to
+    say; code says it, then the handler's `delivered` records it. An unknown
+    name, or a handler with nothing to say, ends the turn silently. A
+    confirmation request still unanswered when such a turn runs is ended
+    (`ConfirmationResolved`, superseded) and the user is told so.
     """
 
     def __init__(
@@ -166,6 +179,7 @@ class Orchestrator:
         max_steps: int = 8,
         history_limit: int = 200,
         confirm_timeout: float = 60.0,
+        timer_handlers: Mapping[str, TimerHandler] | None = None,
     ) -> None:
         if max_steps < 1:
             raise ValueError("max_steps must be at least 1")
@@ -188,9 +202,10 @@ class Orchestrator:
         self._max_steps = max_steps
         self._history_limit = history_limit
         self._confirm_timeout = timedelta(seconds=confirm_timeout)
+        self._timer_handlers = dict(timer_handlers or {})
         self._sessions: dict[str, _Session] = {}
         self._running = False
-        self._subscription = bus.subscribe(UserMessage, Interrupt, PlaybackInterrupted)
+        self._subscription = bus.subscribe(UserMessage, TimerFired, Interrupt, PlaybackInterrupted)
 
     async def run(self) -> None:
         """Handle inbound events until the bus is closed, then stop all turns and return."""
@@ -241,7 +256,7 @@ class Orchestrator:
     # --- Scheduling -----------------------------------------------------------
 
     def _dispatch(self, event: Event) -> None:
-        if isinstance(event, UserMessage):
+        if isinstance(event, UserMessage | TimerFired):
             session = self._sessions.setdefault(event.session_id, _Session())
             session.pending.append(event)
             if session.worker is None:
@@ -283,13 +298,16 @@ class Orchestrator:
 
     # --- One turn -------------------------------------------------------------
 
-    async def _run_turn(self, session: _Session, message: UserMessage) -> None:
+    async def _run_turn(self, session: _Session, message: UserMessage | TimerFired) -> None:
         session.turn_started = True
         turn = _Turn(session_id=message.session_id, turn_id=str(uuid.uuid4()))
         outcome: Outcome = "error"
         error: str | None = None
         try:
-            outcome, error = await self._turn_body(turn, message)
+            if isinstance(message, TimerFired):
+                outcome, error = await self._proactive_body(turn, message)
+            else:
+                outcome, error = await self._turn_body(turn, message)
         except asyncio.CancelledError:
             outcome = "interrupted"
             await self._end_interrupted(turn)
@@ -351,6 +369,36 @@ class Orchestrator:
         error = f"step limit of {self._max_steps} LLM calls reached without a final answer"
         await self._emit(TurnEnded(**self._ids(turn), reason="error", error=error))
         return "error", error
+
+    async def _proactive_body(self, turn: _Turn, event: TimerFired) -> tuple[Outcome, str | None]:
+        """A turn Lucy starts on her own (ADR 0020): code-authored words, no model call."""
+        episodes = await self._memory.recent_episodes(turn.session_id, self._history_limit)
+        request = unresolved_request(episodes)
+        await self._memory.append_episode(event.model_copy(update={"turn_id": turn.turn_id}))
+        parts: list[str] = []
+        reply = None
+        handler = self._timer_handlers.get(event.name)
+        if handler is None:
+            logger.warning("no handler for timer %r; turn %s is silent", event.name, turn.turn_id)
+        else:
+            reply = await handler(event, turn.turn_id)
+            if reply is not None and reply.text:
+                parts.append(reply.text)
+        if request is not None:
+            # The TimerFired now in the log ends the request (confirm.pending_confirmation):
+            # record that, and tell the user, so a later "yes" is not taken as an answer.
+            await self._emit(
+                ConfirmationResolved(**self._ids(turn), request_id=request.id, outcome="superseded")
+            )
+            parts.append(NOT_MADE)
+        if parts:
+            await self._say(turn, " ".join(parts))
+        if reply is not None and reply.delivered is not None:
+            # After the words are logged: a crash before this repeats the reminder later
+            # rather than losing it.
+            await reply.delivered()
+        await self._emit(TurnEnded(**self._ids(turn), reason="completed"))
+        return "completed", None
 
     async def _run_step(self, turn: _Turn, messages: list[Message]) -> tuple[str, list[ToolCall]]:
         """Stream one LLM step, publishing text as it arrives; commit its AssistantMessage."""

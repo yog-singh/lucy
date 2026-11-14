@@ -72,7 +72,7 @@ from lucy.adapters.embed_openai_compat import EmbedderError
 from lucy.adapters.llm_openai_compat import LLMError
 from lucy.core import registry as _registry
 from lucy.core.bus import EventBus, Subscription
-from lucy.core.config import AdapterConfig, Settings
+from lucy.core.config import DEFAULT_MEMORY, Settings
 from lucy.core.context import ContextBuilder
 from lucy.core.events import TurnEnded
 from lucy.core.gateway import LLMGateway, Preempted, add_fallbacks
@@ -80,6 +80,7 @@ from lucy.core.jobs import Handler, Job, JobRunner, JobStatus, utc_now
 from lucy.core.orchestrator import Orchestrator
 from lucy.core.ports import STT, TTS, Embedder, MemoryStore, Tool, TraceSink
 from lucy.core.registry import Registry
+from lucy.core.reminders import REMINDER_TIMER, ReminderService, TimerHandler
 from lucy.core.residency import Residency
 from lucy.core.trace import TurnTrace
 from lucy.core.types import MemoryContext, Risk
@@ -111,9 +112,11 @@ from lucy.memory.reconcile import Reconciler
 from lucy.memory.reflection import REFLECT_JOB, Reflector, reflection_handler
 from lucy.memory.retrieval import Retriever
 from lucy.memory.sqlite_jobs import SQLiteJobStore
+from lucy.memory.sqlite_reminders import SQLiteReminderStore
 from lucy.memory.sqlite_store import SQLiteMemoryStore
 from lucy.prompts import load_prompt
 from lucy.tools import build_tools
+from lucy.tools.reminders import REMINDER_TOOLS, build_store, local_announcement
 
 logger = logging.getLogger(__name__)
 
@@ -125,9 +128,6 @@ BUILTIN_ADAPTER_MODULES: Final = (
     "lucy.adapters.tts_openai_compat",
 )
 """Modules imported at startup so their adapters register themselves."""
-
-DEFAULT_MEMORY: Final = AdapterConfig(adapter="sqlite", options={"path": "data/lucy.db"})
-"""The memory store used when the settings have no `[memory]` section."""
 
 LEARNING_ROLES: Final = ("extraction", "summary")
 """LLM roles the learning loop needs. Duplicate-merge checks use `summary`."""
@@ -306,7 +306,11 @@ class LucyApp:
         self._speech = speech
         self._stt: STT | None = None
         self._tts: TTS | None = None
-        self._tool_builder = tool_builder or (lambda s: build_tools(s, clock=clock))
+        self._tool_builder = tool_builder or (
+            lambda s: build_tools(s, clock=clock, reminder_store=self._reminder_store)
+        )
+        self._reminder_store: SQLiteReminderStore | None = None
+        self._reminders: ReminderService | None = None
         self._tools: list[Tool] = []
         self._registry = registry
         self._background = background
@@ -399,6 +403,14 @@ class LucyApp:
         return self._retriever
 
     @property
+    def reminders(self) -> ReminderService | None:
+        """Fires and delivers due reminders (ADR 0020), when a reminder tool is enabled.
+
+        A client that can tell when it is idle runs `wait_due` / `fire` and publishes
+        the `TimerFired`; None when no reminder tool is enabled."""
+        return self._reminders
+
+    @property
     def residency(self) -> Residency | None:
         """The model residency policy, when it is running."""
         return self._residency
@@ -468,8 +480,16 @@ class LucyApp:
             await self._start_learning(create)
 
             trace = _FallbackTraces(memory) if isinstance(memory, TraceSink) else None
-            self._tools = list(self._tool_builder(self.settings))
             clock = self._clock
+            timer_handlers: dict[str, TimerHandler] = {}
+            if REMINDER_TOOLS & set(self.settings.tools.enabled):
+                # One connection for the tools and the delivery (the tools share it).
+                self._reminder_store = build_store(self.settings, clock)
+                self._reminders = ReminderService(
+                    self._reminder_store, memory, local_announcement, clock=clock
+                )
+                timer_handlers[REMINDER_TIMER] = self._reminders.handle
+            self._tools = list(self._tool_builder(self.settings))
             context = ContextBuilder(
                 system_prompt(
                     [t.name for t in self._tools],
@@ -486,6 +506,7 @@ class LucyApp:
                 tools=self._tools,
                 trace=trace,
                 confirm_timeout=self.settings.tools.confirm_timeout,
+                timer_handlers=timer_handlers,
             )
             self._run_task = asyncio.create_task(self._orchestrator.run(), name="lucy-orchestrator")
             self._start_residency(self._orchestrator)
@@ -762,6 +783,10 @@ class LucyApp:
             tools, self._tools = self._tools, []
             for tool in tools:
                 await _close_quietly(tool, "aclose")
+            self._reminders = None
+            reminder_store, self._reminder_store = self._reminder_store, None
+            if reminder_store is not None:
+                await _close_quietly(reminder_store, "close")
             stt, tts, self._stt, self._tts = self._stt, self._tts, None, None
             for speech in (stt, tts):
                 if speech is not None:

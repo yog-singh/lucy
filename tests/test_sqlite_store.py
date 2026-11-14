@@ -46,6 +46,8 @@ LATEST_TABLES = {
     "profile_versions",
     "vector_spaces",
     "memory_meta",
+    "reminders",
+    "sqlite_sequence",  # kept by SQLite for the AUTOINCREMENT of reminders
     *(
         f"{t}_fts{s}"
         for t in ("statements", "entities")
@@ -181,7 +183,7 @@ async def test_fresh_database_gets_latest_schema(tmp_path: Path) -> None:
     path = tmp_path / "lucy.db"
     async with SQLiteMemoryStore(path):
         pass
-    assert _version(path) == len(migrations.MIGRATIONS) == 5
+    assert _version(path) == len(migrations.MIGRATIONS) == 6
     assert _tables(path) == LATEST_TABLES
 
 
@@ -192,7 +194,7 @@ async def test_reopen_is_a_noop(tmp_path: Path) -> None:
         await store.append_episode(event)
     async with SQLiteMemoryStore(path) as store:
         assert await store.recent_episodes("s", 10) == [event]
-    assert _version(path) == 5
+    assert _version(path) == len(migrations.MIGRATIONS)
 
 
 async def test_newer_database_is_rejected(tmp_path: Path) -> None:
@@ -249,7 +251,7 @@ async def test_database_at_version_1_upgrades_with_episodes_intact(tmp_path: Pat
         assert await store.recent_episodes("s", 10) == events
         await store.record(_trace("t"))
         assert await store.get_trace("t") == _trace("t")
-    assert _version(path) == 5
+    assert _version(path) == len(migrations.MIGRATIONS)
     assert _tables(path) == LATEST_TABLES
 
 

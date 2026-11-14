@@ -30,6 +30,7 @@ from lucy.app import JobBacklog, LucyApp
 from lucy.clients import memory_cli, voice_cli
 from lucy.core.config import ConfigError, Settings, WakeSettings, load_settings
 from lucy.core.events import Interrupt, TextDelta, ToolStarted, TurnEnded, UserMessage
+from lucy.core.reminders import ReminderService
 from lucy.core.types import ToolCall
 
 DEFAULT_CONFIG: Final = Path("lucy.toml")
@@ -43,6 +44,15 @@ _HISTORY_COUNT_LIMIT: Final = 1_000_000
 ReadLine = Callable[[], Awaitable[str | None]]
 """Returns the next input line without its line ending, or None at end of input."""
 
+PrintAbove = Callable[[str], Awaitable[None]]
+"""Prints a line above the prompt being edited, keeping what is typed (`TerminalReader`)."""
+
+PROACTIVE_GRACE: Final = 3.0
+"""Seconds `lucy chat` waits after a reminder is due before claiming it, so a voice
+client on the same database (`lucy voice`, `lucy listen`) wins and speaks it."""
+
+logger = logging.getLogger(__name__)
+
 
 class ChatLoop:
     """One interactive chat session against a running `LucyApp`.
@@ -54,6 +64,15 @@ class ChatLoop:
 
     With `reader_prompts`, `read_line` draws the prompt itself (`TerminalReader`)
     and the loop writes neither the prompt nor the line end after it.
+
+    Reminders (ADR 0020): when the app has a `ReminderService`, a background task
+    started after the banner delivers due reminders (also ones missed while Lucy
+    was off) as proactive turns and prints them as "lucy> ...": above the prompt
+    with `print_above` (keeping the half-typed line), else on a line of its own
+    followed by the prompt again. It waits `proactive_grace` seconds after a
+    reminder is due before claiming it, so a voice client wins. A floor lock,
+    held by each user turn and by each delivery, keeps them from interleaving and
+    keeps "the first turn seen is ours" true.
     """
 
     def __init__(
@@ -66,6 +85,8 @@ class ChatLoop:
         err: TextIO,
         echo_input: bool = False,
         reader_prompts: bool = False,
+        print_above: PrintAbove | None = None,
+        proactive_grace: float = PROACTIVE_GRACE,
     ) -> None:
         self._app = app
         self._session_id = session_id
@@ -74,6 +95,10 @@ class ChatLoop:
         self._err = err
         self._echo_input = echo_input
         self._reader_prompts = reader_prompts
+        self._print_above = print_above
+        self._proactive_grace = proactive_grace
+        self._floor = asyncio.Lock()
+        self._at_prompt = False
         self._in_turn = False
         self._quit = asyncio.Event()
         self._interrupts: set[asyncio.Task[None]] = set()
@@ -109,19 +134,79 @@ class ChatLoop:
             pending = 0
         if pending:
             self._print_err(f"{_jobs(pending)} pending; they run in the background while you chat.")
+        service = self._app.reminders
+        proactive = (
+            asyncio.create_task(self._deliver_reminders(service), name="lucy-chat-reminders")
+            if service is not None
+            else None
+        )
+        try:
+            while True:
+                line = await self._next_line()
+                if line is None:
+                    break
+                text = line.strip()
+                if not text:
+                    continue
+                if text in QUIT_COMMANDS:
+                    break
+                if not await self._turn(text):
+                    self._print_err("Lucy has stopped.")
+                    return 1
+            return 0
+        finally:
+            if proactive is not None:
+                proactive.cancel()
+                await asyncio.gather(proactive, return_exceptions=True)
+
+    async def _deliver_reminders(self, service: ReminderService) -> None:
+        """Deliver due reminders as proactive turns until cancelled or the app stops."""
         while True:
-            line = await self._next_line()
-            if line is None:
-                break
-            text = line.strip()
-            if not text:
-                continue
-            if text in QUIT_COMMANDS:
-                break
-            if not await self._turn(text):
-                self._print_err("Lucy has stopped.")
-                return 1
-        return 0
+            try:
+                await service.wait_due()
+                await asyncio.sleep(self._proactive_grace)
+                async with self._floor:
+                    text = await self._proactive_turn(service)
+                    if text:
+                        await self._show_above(f"lucy> {text}")
+            except asyncio.CancelledError:
+                raise
+            except RuntimeError:  # the bus is closed: Lucy has stopped
+                return
+            except Exception:
+                logger.exception("could not deliver a reminder")
+                await asyncio.sleep(service.poll)
+
+    async def _proactive_turn(self, service: ReminderService) -> str:
+        """Fire due reminders and return what the proactive turn said ("" if nothing)."""
+        bus = self._app.bus
+        async with bus.subscribe(TextDelta, TurnEnded) as events:
+            event = await service.fire(self._session_id)
+            if event is None:
+                return ""
+            await bus.publish(event)
+            turn_id: str | None = None
+            parts: list[str] = []
+            async for seen in events:
+                if seen.session_id != self._session_id:
+                    continue
+                turn_id = turn_id or seen.turn_id  # the floor is ours: this turn is ours
+                if seen.turn_id != turn_id:
+                    continue
+                if isinstance(seen, TextDelta):
+                    parts.append(seen.text)
+                elif isinstance(seen, TurnEnded):
+                    return "".join(parts).strip()
+        raise RuntimeError("the bus closed during a reminder")
+
+    async def _show_above(self, line: str) -> None:
+        """Print `line` without disturbing the prompt (see the class docstring)."""
+        if self._print_above is not None:
+            await self._print_above(line)
+        elif self._at_prompt and not self._reader_prompts:
+            self._write(f"\n{line}\n{PROMPT}")
+        else:
+            self._write(f"{line}\n")
 
     async def _next_line(self) -> str | None:
         """Prompt and wait for a line, or None on end of input or Ctrl-C at the prompt."""
@@ -129,9 +214,11 @@ class ChatLoop:
             self._write(PROMPT)
         reader = asyncio.ensure_future(self._read_line())
         quitter = asyncio.ensure_future(self._quit.wait())
+        self._at_prompt = True
         try:
             await asyncio.wait({reader, quitter}, return_when=asyncio.FIRST_COMPLETED)
         finally:
+            self._at_prompt = False
             for task in (reader, quitter):
                 if not task.done():
                     task.cancel()
@@ -148,6 +235,10 @@ class ChatLoop:
 
     async def _turn(self, text: str) -> bool:
         """Send one message and stream the reply. False if the app stopped mid-turn."""
+        async with self._floor:  # waits for a reminder being delivered
+            return await self._user_turn(text)
+
+    async def _user_turn(self, text: str) -> bool:
         bus = self._app.bus
         self._in_turn = True
         try:
@@ -395,6 +486,21 @@ class TerminalReader:
             return None
         return line
 
+    async def print_above(self, text: str) -> None:
+        """Print a line above the prompt, which is redrawn with what was typed so far.
+
+        Uses prompt_toolkit's `run_in_terminal` (no global `patch_stdout`); with no
+        prompt showing it just prints."""
+        from prompt_toolkit.application import run_in_terminal
+
+        output = self._session.output
+
+        def show() -> None:
+            output.write_raw(text + "\n")
+            output.flush()
+
+        await run_in_terminal(show)
+
 
 def chat_history_path(settings: Settings) -> Path:
     """Where `lucy chat` keeps input history: beside the SQLite database, else in data/."""
@@ -557,8 +663,10 @@ def _load_settings(config: Path | None) -> Settings:
 async def _chat(settings: Settings, session_id: str) -> int:
     interactive = sys.stdin.isatty() and sys.stdout.isatty()
     read_line: ReadLine
+    print_above: PrintAbove | None = None
     if interactive:  # line editing and history (see `TerminalReader`)
-        read_line = TerminalReader(PROMPT, chat_history_path(settings)).readline
+        terminal = TerminalReader(PROMPT, chat_history_path(settings))
+        read_line, print_above = terminal.readline, terminal.print_above
     else:
         reader = StdinReader(sys.stdin.fileno())
         reader.start()
@@ -573,6 +681,7 @@ async def _chat(settings: Settings, session_id: str) -> int:
             err=sys.stderr,
             echo_input=not sys.stdin.isatty(),
             reader_prompts=interactive,
+            print_above=print_above,
         )
         # Ctrl-C is handled by the event loop, not as KeyboardInterrupt: the handler
         # runs on the loop between callbacks, so it can publish an Interrupt or wake

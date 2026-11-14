@@ -140,7 +140,7 @@ async def test_migration_4_to_5_keeps_everything(path: Path, clock: Clock) -> No
     assert query(path, "PRAGMA user_version")[0][0] == 4
 
     async with SQLiteGraphStore(path, HashingEmbedder(), clock=clock) as upgraded:
-        assert query(path, "PRAGMA user_version")[0][0] == 5
+        assert query(path, "PRAGMA user_version")[0][0] == len(migrations.MIGRATIONS)
         assert await upgraded.get_statement(statement.id) == statement
         assert await upgraded.get_entity(priya.id) == priya
         assert (await upgraded.find_entities("my sister"))[0].id == priya.id

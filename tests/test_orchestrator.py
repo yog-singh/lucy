@@ -103,6 +103,7 @@ class Harness:
         memory: InMemoryMemoryStore | None = None,
         trace: Any = None,
         confirm_timeout: float = 60.0,
+        timer_handlers: Any = None,
     ) -> None:
         self.bus = EventBus()
         self.out = self.bus.subscribe(*OUTBOUND_EVENTS)
@@ -118,6 +119,7 @@ class Harness:
             trace=self.trace,
             max_steps=max_steps,
             confirm_timeout=confirm_timeout,
+            timer_handlers=timer_handlers,
         )
         self.task: asyncio.Task[None] | None = None
 

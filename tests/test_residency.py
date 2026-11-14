@@ -12,7 +12,7 @@ import pytest
 
 from lucy.core.bus import EventBus
 from lucy.core.context import ContextBuilder
-from lucy.core.events import SpeechActivity, TurnEnded, UserMessage
+from lucy.core.events import SpeechActivity, TimerFired, TurnEnded, UserMessage
 from lucy.core.gateway import LLMGateway, Priority
 from lucy.core.orchestrator import Orchestrator
 from lucy.core.residency import Residency, resident
@@ -140,6 +140,27 @@ async def test_a_turn_in_flight_is_busy_even_between_tool_steps() -> None:
     assert await rig.residency.busy_reason() == "turn"
     await rig.idle_for(60)
     assert rig.server.calls == []
+    rig.residency.handle(TurnEnded(session_id="s", reason="completed"))
+    assert await rig.residency.busy_reason() is None
+
+
+async def test_a_turn_end_with_no_start_seen_is_harmless() -> None:
+    """A proactive turn's TurnEnded may come with no UserMessage (ADR 0020)."""
+    rig = Rig()
+    rig.used()
+    rig.residency.handle(TurnEnded(session_id="s", reason="completed"))
+    assert await rig.residency.busy_reason() is None
+    rig.residency.handle(UserMessage(session_id="s", text="hi"))  # still counted from zero
+    assert await rig.residency.busy_reason() == "turn"
+    rig.residency.handle(TurnEnded(session_id="s", reason="completed"))
+    assert await rig.residency.busy_reason() is None
+
+
+async def test_a_timer_turn_is_busy_until_it_ends() -> None:
+    rig = Rig()
+    rig.used()
+    rig.residency.handle(TimerFired(session_id="s", name="reminder"))
+    assert await rig.residency.busy_reason() == "turn"
     rig.residency.handle(TurnEnded(session_id="s", reason="completed"))
     assert await rig.residency.busy_reason() is None
 

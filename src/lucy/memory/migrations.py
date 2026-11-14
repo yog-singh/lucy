@@ -181,5 +181,27 @@ MIGRATIONS: Final[tuple[str, ...]] = (
       updated_at TEXT NOT NULL                  -- ISO 8601 UTC, fixed width
     ) WITHOUT ROWID;
     """,
+    # 6: reminders and timers (lucy.core.reminders). AUTOINCREMENT so an id the
+    # user heard ("r12") never comes back for a different reminder.
+    """
+    CREATE TABLE reminders (
+      id                INTEGER PRIMARY KEY AUTOINCREMENT,
+      kind              TEXT NOT NULL CHECK (kind IN ('reminder', 'timer')),
+      text              TEXT NOT NULL,
+      due_at            TEXT NOT NULL,          -- ISO 8601 UTC, fixed width
+      status            TEXT NOT NULL
+                        CHECK (status IN ('pending', 'firing', 'delivered', 'cancelled')),
+      repeat            TEXT,                   -- reserved; NULL for one-off reminders
+      session_id        TEXT,
+      created_at        TEXT NOT NULL,
+      updated_at        TEXT NOT NULL,
+      claimed_by        TEXT,
+      claimed_at        TEXT,
+      delivered_at      TEXT,
+      delivered_session TEXT,
+      delivered_turn    TEXT
+    );
+    CREATE INDEX reminders_due ON reminders(status, due_at);
+    """,
 )
 """Ordered SQL scripts; the schema version after applying `MIGRATIONS[:n]` is `n`."""

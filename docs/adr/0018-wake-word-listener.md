@@ -24,3 +24,7 @@ Voice stage 1 needs `lucy voice` started by hand and holds the speech recogniser
 - Background memory work does not run until Lucy has been woken once, because the app is not built before then.
 - On synthesised speech the stand-in model detected 8 of 8 positives but also woke on 3 of 12 negatives, including "Hey Charles" in one voice at 0.985 and "Hey Travis" at 0.57. Near-miss names are a real false-wake risk; the threshold is configurable and a custom model needs a proper false-wake test.
 - The wake phrase cannot interrupt Lucy until barge-in exists.
+
+## Note, 2026-11-14: reminders
+
+Due reminders are spoken whatever the listener's state (ADR 0020). While a reminder is thought about or spoken the wake stage is reset and not fed; the wake chime plays before it; afterwards the follow-up window opens without the wake phrase. Before the first wake a store-only scheduler calls `WakeListener.rouse()`, which builds the session without a wake phrase, so the app can now be built without a wake.

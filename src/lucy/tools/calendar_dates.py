@@ -19,6 +19,12 @@ instead of guessing. Weeks start on Monday.
 Times are built with the zone's rules, so days around a daylight-saving change
 have 23 or 25 hours, and a clock time that does not exist that day (the hour the
 clocks skip) is refused.
+
+`resolve_moment` reads one future instant for a reminder: a length of time from
+now ("in 20 minutes", number words included), or a day and time as above, plus a
+part of the day with a clock time ("tomorrow morning at 9"). There a bare hour
+("at 5") is the soonest future 05:00 or 17:00, unlike `resolve`, which reads it
+as 05:00.
 """
 
 from __future__ import annotations
@@ -336,3 +342,233 @@ def _calendar_date(words: str, today: date) -> tuple[date, int] | None:
     except ValueError:
         raise DateError(f"{words!r} is not a date on the calendar.") from None
     return min(candidates, key=lambda d: abs((d - today).days)), 1
+
+
+# --- Moments, for reminders and timers ------------------------------------------
+
+MOMENT_ACCEPTED: Final = (
+    "Accepted: a length of time from now ('in 20 minutes', 'in an hour and a half'), a day "
+    "with a time ('tomorrow 9am', 'friday at 17:30', 'tomorrow morning at 9', '20 November "
+    "3pm'), or a time later today ('5pm', '17:30')."
+)
+_NUMBERS: Final = {
+    word: i
+    for i, word in enumerate(
+        "zero one two three four five six seven eight nine ten eleven twelve thirteen "
+        "fourteen fifteen sixteen seventeen eighteen nineteen".split()
+    )
+}
+_TENS: Final = {
+    word: 10 * (i + 2)
+    for i, word in enumerate("twenty thirty forty fifty sixty seventy eighty ninety".split())
+}
+_UNITS: Final = {
+    **dict.fromkeys(("second", "seconds", "sec", "secs", "s"), timedelta(seconds=1)),
+    **dict.fromkeys(("minute", "minutes", "min", "mins", "m"), timedelta(minutes=1)),
+    **dict.fromkeys(("hour", "hours", "hr", "hrs", "h"), timedelta(hours=1)),
+}
+_LONG_UNITS: Final = frozenset(
+    "day days week weeks fortnight fortnights month months year years".split()
+)
+_PHRASES: Final = (
+    (r"\bthree quarters? of an hour\b", "45 minutes"),
+    (r"\b(?:a )?quarter (?:of )?(?:an )?hour\b", "15 minutes"),
+    (r"\b(?:a |one )?half (?:an |a )?hour\b", "30 minutes"),
+    (r"\bhalf (?:a )?minute\b", "30 seconds"),
+    (r"\ba couple of\b", "2"),
+    (r"\band a half\b", "+half"),
+)
+_PART_WORDS: Final = re.compile(r"\b(?:in the |this |at )?(morning|afternoon|evening|night)\b")
+_MERIDIEM: Final = re.compile(r"\d\s*[ap]\.?m?\.?(?![a-z])|\d[:.h]\d|\b(?:noon|midday|midnight)\b")
+
+
+@dataclass(frozen=True)
+class Moment:
+    """A resolved instant for a reminder, in the user's zone."""
+
+    at: datetime
+    offset: timedelta | None = None
+    """Set when the words were a length of time from now ("in 20 minutes")."""
+    note: str | None = None
+    """Something the model must say back, e.g. how a bare hour was read."""
+
+
+def _number_tokens(words: str) -> list[str]:
+    """Tokens with spelled-out numbers ("twenty five", "an hour") turned into digits."""
+    tokens = words.split()
+    out: list[str] = []
+    i = 0
+    while i < len(tokens):
+        token, nxt = tokens[i], tokens[i + 1] if i + 1 < len(tokens) else ""
+        if token in _TENS:
+            value = _TENS[token]
+            if nxt in _NUMBERS and 0 < _NUMBERS[nxt] < 10:
+                value += _NUMBERS[nxt]
+                i += 1
+            out.append(str(value))
+        elif token in _NUMBERS:
+            out.append(str(_NUMBERS[token]))
+        elif token in {"a", "an"} and (nxt in _UNITS or nxt in _LONG_UNITS):
+            out.append("1")
+        else:
+            out.append(token)
+        i += 1
+    return out
+
+
+def parse_offset(text: str) -> timedelta | None:
+    """A length of time ("in 20 minutes", "an hour and a half", "twenty five minutes",
+    "1h30"), or None if `text` is not one. Raises `DateError` for days or weeks, and
+    for lengths of zero."""
+    words = text.strip().lower().replace("-", " ").replace(",", " ")
+    words = re.sub(r"[.!?]+$", "", words).strip()
+    words = re.sub(r"(\d)([a-z])", r"\1 \2", words)  # "10min", "1h30"
+    words = re.sub(r"\b([hm])(\d)", r"\1 \2", words)
+    words = re.sub(r"^(?:in|for|after)\s+", "", words)
+    words = re.sub(r"\s+(?:from now|time|'s time)$", "", words)
+    for pattern, replacement in _PHRASES:
+        words = re.sub(pattern, replacement, words)
+    tokens = _number_tokens(words)
+    total, last_unit = timedelta(), None
+    i = 0
+    while i < len(tokens):
+        if tokens[i] == "and" and last_unit is not None:
+            i += 1
+            continue
+        if not re.fullmatch(r"\d+(?:\.\d+)?", tokens[i]):
+            return None
+        value = float(tokens[i])
+        i += 1
+        if i < len(tokens) and tokens[i] == "+half":
+            value, i = value + 0.5, i + 1
+        word = tokens[i] if i < len(tokens) else ""
+        if word in _LONG_UNITS:
+            raise DateError(
+                f"{text!r} is days or weeks away; a reminder takes a day and a time instead, "
+                "such as 'tuesday 9am' or '20 November at 17:00'. Ask the user which day and "
+                "what time."
+            )
+        unit = _UNITS.get(word)
+        if unit is None:
+            # A bare number closing a length: "1 hour 30" is minutes, "1h30" too.
+            if word or last_unit is None or last_unit == timedelta(seconds=1):
+                return None
+            hours = last_unit == timedelta(hours=1)
+            total += value * (timedelta(minutes=1) if hours else timedelta(seconds=1))
+            break
+        i += 1
+        if i < len(tokens) and tokens[i] == "+half":
+            value, i = value + 0.5, i + 1
+        total += value * unit
+        last_unit = unit
+    if last_unit is None:
+        return None
+    total = timedelta(seconds=round(total.total_seconds()))
+    if total <= timedelta():
+        raise DateError(f"{text!r} is no time at all. Ask the user how long.")
+    return total
+
+
+def resolve_moment(text: str, now: datetime) -> Moment:
+    """`text` as one future instant for a reminder, relative to `now` (aware, in the
+    user's zone).
+
+    A length of time ("in 20 minutes") is added to the instant (so it is right across
+    a daylight-saving change). Otherwise a day and time as `resolve` reads them, plus
+    a part of the day with a clock time ("tomorrow morning at 9", "9 in the
+    evening"). A bare hour without am or pm ("at 5") is the soonest future 5:00 or
+    17:00, and the `note` says so; with a day named ("friday at 5") it is refused,
+    asking the user for morning or evening. Refused: a day or part of the day without a time,
+    lengths in days or weeks, and times already past.
+    """
+    zone = now.tzinfo
+    assert zone is not None
+    raw = text.strip()
+    if not raw:
+        raise DateError(f"No time was given. Ask the user when. {MOMENT_ACCEPTED}")
+    offset = parse_offset(raw)
+    if offset is not None:
+        return Moment((now.astimezone(UTC) + offset).astimezone(zone), offset=offset)
+    iso = bool(re.match(r"^\d{4}-\d{2}-\d{2}", raw))
+    words = raw.lower().replace(",", " ")
+    words = re.sub(r"[.!?]+$", "", words)
+    words = re.sub(r"\s*o'?\s?clock\b", "", words)
+    part: str | None = None
+    if re.search(r"\btonight\b", words):
+        part, words = "evening", re.sub(r"\btonight\b", " ", words)
+    elif not iso and (match := _PART_WORDS.search(words)):
+        part, words = match.group(1), words[: match.start()] + " " + words[match.end() :]
+    words = re.sub(r"\s+", " ", words).strip()
+    if words in {"now", "right now"}:
+        raise DateError("A reminder needs a time later than now. Ask the user when.")
+    if not words:
+        assert part is not None
+        raise DateError(
+            f"{raw!r} is a part of the day, not a time. Ask the user what time to remind them."
+        )
+    try:
+        span = resolve(raw if iso else words, now)
+    except DateError as exc:
+        if str(exc).startswith("Could not read"):
+            raise DateError(f"Could not read {raw!r} as a time. {MOMENT_ACCEPTED}") from None
+        raise
+    if not span.is_point:
+        what = "a part of the day" if part or span.kind == "part" else "a day without a time"
+        raise DateError(
+            f"{raw!r} is {what} ({span_text(span)}), not a time. Ask the user what time to "
+            "remind them."
+        )
+    at, note = span.start, None
+    explicit = iso or bool(_MERIDIEM.search(words))
+    if part and not explicit:
+        if part != "morning" and 1 <= at.hour <= 11:
+            at = local(at.date(), time(at.hour + 12, at.minute), zone)
+        elif part in {"evening", "night"} and at.hour == 12 and at.minute == 0:
+            at = midnight(at.date() + timedelta(1), zone)
+    elif not part and not explicit and at.minute == 0 and 1 <= at.hour <= 12:
+        if parse_clock(_clean(words)) is None:  # a day was named: ask, do not guess
+            raise DateError(_ask_meridiem(raw, at))
+        at, note = _bare_hour(at, now)
+    if at <= now:
+        raise DateError(
+            f"{moment_text(at)} is in the past (it is now {moment_text(now)}). Ask the user "
+            "for a later time."
+        )
+    return Moment(at, note=note)
+
+
+def _ask_meridiem(raw: str, at: datetime) -> str:
+    """The refusal for a bare hour on a named day ("friday at 5"): ask morning or evening."""
+    if at.hour == 12:
+        readings = f"12:00 (noon) on {at:%A} or midnight at the end of {at:%A}"
+    else:
+        readings = f"{at.hour:02d}:00 or {at.hour + 12:02d}:00 on {at:%A} {at.day} {at:%B}"
+    return (
+        f"{raw!r} gives no am or pm. Ask the user whether they mean the morning or the "
+        f"evening: {readings}."
+    )
+
+
+def _bare_hour(at: datetime, now: datetime) -> tuple[datetime, str | None]:
+    """The soonest future reading of a bare hour with no day named (5:00 or 17:00; 12:00
+    or midnight), today or tomorrow; and a note saying how it was read."""
+    zone = now.tzinfo
+    assert zone is not None
+    hours = (12, 24) if at.hour == 12 else (at.hour, at.hour + 12)
+    days = [now.date(), now.date() + timedelta(1)]
+    candidates = []
+    for day in days:
+        for hour in hours:
+            try:
+                candidates.append(local(day + timedelta(hour // 24), time(hour % 24), zone))
+            except DateError:
+                continue
+    future = [c for c in candidates if c > now]
+    if not future:
+        return at, None  # past: refused by the caller
+    chosen = min(future)
+    readings = " and ".join("midnight" if h == 24 else f"{h:02d}:00" for h in hours)
+    return chosen, (
+        f"No am or pm was given, so {at.hour} was read as {chosen:%H:%M}, the sooner of "
+        f"{readings}. Say this time back so the user can correct it."
+    )

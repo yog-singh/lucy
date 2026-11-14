@@ -389,7 +389,7 @@ async def test_shares_the_file_with_the_memory_store(tmp_path: Path, clock: Fake
         assert await memory.recent_episodes("s", 1) == [event]
         job = await claim_one(jobs, clock)
         assert job.payload == {"event_id": event.id}
-    assert _version(path) == len(migrations.MIGRATIONS) == 5
+    assert _version(path) == len(migrations.MIGRATIONS) == 6
 
 
 async def test_migration_2_to_3_keeps_episodes_and_traces(tmp_path: Path, clock: FakeClock) -> None:
@@ -411,7 +411,7 @@ async def test_migration_2_to_3_keeps_episodes_and_traces(tmp_path: Path, clock:
     async with SQLiteJobStore(path, clock=clock) as jobs:  # the job store migrates the file
         job = await jobs.enqueue("extract", {"turn": "t"})
         assert (await claim_one(jobs, clock)).id == job.id
-    assert _version(path) == 5
+    assert _version(path) == len(migrations.MIGRATIONS)
     async with SQLiteMemoryStore(path) as memory:
         assert await memory.recent_episodes("s", 10) == events
         assert await memory.get_trace("t") == _trace("t")

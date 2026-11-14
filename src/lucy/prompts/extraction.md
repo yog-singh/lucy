@@ -11,6 +11,7 @@ Store lasting things the user says outright, worth knowing weeks later:
 Return an empty list for: greetings, small talk, thanks, questions, requests for information or help, hypotheticals ("if I ever..."), anything about this conversation itself, and passing details (what the user is doing right now, today's weather). Also for:
 - one choice, order or request ("I'll take the window seat", "pad thai again please", "let's go with the lasagne", "shorter please"). One choice is not a preference and not a decision.
 - plans and intentions ("I'm going to cycle to work next week", "I'm repainting the kitchen on Saturday"). A plan is not a goal.
+- requests to set, list or cancel reminders and timers ("remind me to call the bank at 5", "set a timer for ten minutes"). They are commands, not facts about the user; store only a lasting fact the user reveals along the way.
 - anything you would have to guess or conclude. Store only what the user said.
 Many turns have nothing to store; then return an empty list.
 

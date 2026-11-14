@@ -66,6 +66,10 @@ def events_to_messages(
 
     An interrupted `AssistantMessage` keeps the text that was delivered.
 
+    A text-only assistant message that directly follows a text-only assistant
+    message (a proactive turn after a reply, ADR 0020) is merged into it, the
+    texts separated by a blank line, so roles still alternate.
+
     Spoken replies (ADR 0016): when a turn has a `PlaybackInterrupted` event, the
     text of that turn's final `AssistantMessage` is replaced by the event's
     `spoken_text`, since that is what the user heard; with no spoken text the
@@ -107,6 +111,18 @@ def events_to_messages(
             if not text and not calls:
                 continue
             open_calls.update(c.id for c in calls)
+            last = messages[-1] if messages else None
+            if (
+                not calls
+                and last is not None
+                and last.role == Role.ASSISTANT
+                and not last.tool_calls
+                and last.content
+            ):
+                # Two replies with no user message between (a proactive turn, ADR 0020):
+                # chat templates expect turns to alternate, so they become one.
+                messages[-1] = last.model_copy(update={"content": f"{last.content}\n\n{text}"})
+                continue
             messages.append(Message(role=Role.ASSISTANT, content=text, tool_calls=calls or None))
         elif isinstance(event, ToolFinished):
             if event.result.call_id in open_calls:

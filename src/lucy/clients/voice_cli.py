@@ -28,6 +28,7 @@ import logging
 import signal
 import sys
 from collections.abc import Callable, Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, TextIO
 
@@ -340,7 +341,7 @@ async def _converse(
     interactive: bool,
 ) -> int:
     from lucy.clients.cli import memory_banner
-    from lucy.voice.session import VoiceConfig, VoiceSession
+    from lucy.voice.session import VoiceConfig, VoiceSession, deliver_reminders
 
     ui = TerminalUI(out, err, show_state=interactive)
     session = VoiceSession(
@@ -368,8 +369,22 @@ async def _converse(
         print("Ctrl-C quits.", file=err)
     err.flush()
 
-    await _run_with_keys(session.run(), session.interrupt, session.stop, err, interactive)
+    reminders = (
+        asyncio.create_task(deliver_reminders(session, app.reminders), name="lucy-voice-reminders")
+        if app.reminders is not None
+        else None
+    )  # also speaks reminders that came due while Lucy was off, once the session runs
+    try:
+        await _run_with_keys(session.run(), session.interrupt, session.stop, err, interactive)
+    finally:
+        await _cancel(reminders)
     return 0
+
+
+async def _cancel(task: asyncio.Task[Any] | None) -> None:
+    if task is not None:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 async def _run_with_keys(
@@ -466,7 +481,7 @@ async def run_listen(
     from lucy.app import LucyApp
     from lucy.clients.cli import backlog_message, memory_banner
     from lucy.voice.audio import AudioDeviceError, FileAudioIO, SoundDeviceIO
-    from lucy.voice.session import VoiceConfig, VoiceSession
+    from lucy.voice.session import VoiceConfig, VoiceSession, deliver_reminders
     from lucy.voice.vad import SileroVAD
     from lucy.voice.wake import ListenerConfig, WakeListener, WakePhraseSTT, WakeStage
     from lucy.voice.wakeword import OpenWakeWordDetector, missing_models
@@ -509,9 +524,13 @@ async def run_listen(
         return 2
     ui = TerminalUI(out, err, show_state=interactive)
     app: LucyApp | None = None
+    reminders: asyncio.Task[None] | None = None
+    early = _early_reminders(settings)  # before the first wake: the store alone
+    rouser: asyncio.Task[None] | None = None
 
     async def make_session(session_io: AudioIO, session_ui: Any) -> VoiceSession:
-        nonlocal app
+        nonlocal app, reminders
+        await _stop_early(rouser, early)
         app = LucyApp(settings, registry=registry, speech=True)
         await app.start()
         vad = (make_vad or SileroVAD)()
@@ -520,7 +539,7 @@ async def run_listen(
             load()
         earlier = len(await app.memory.recent_episodes(args.session, 1_000_000))
         ui.notice(f"Session {args.session!r} ({earlier} earlier events). {memory_banner(app)}")
-        return VoiceSession(
+        session = VoiceSession(
             bus=app.bus,
             session_id=args.session,
             io=session_io,
@@ -531,6 +550,12 @@ async def run_listen(
             ui=session_ui,
             timings_path=timings_path(settings),
         )
+        if app.reminders is not None:
+            reminders = asyncio.create_task(
+                deliver_reminders(session, app.reminders, cue=listener.cue),
+                name="lucy-listen-reminders",
+            )
+        return session
 
     listener = WakeListener(
         io=io,
@@ -550,6 +575,14 @@ async def run_listen(
     )
     err.flush()
     code = 0
+    if early is not None:
+
+        async def rouse_when_due() -> None:
+            await early.wait_due()
+            logger.info("a reminder is due before the first wake: starting Lucy")
+            listener.rouse()
+
+        rouser = asyncio.create_task(rouse_when_due(), name="lucy-listen-early-reminders")
     try:
         if isinstance(io, SoundDeviceIO):
             await io.start()
@@ -558,9 +591,39 @@ async def run_listen(
         print(f"lucy listen: {exc}", file=err)
         code = 1
     finally:
+        await _stop_early(rouser, early)
+        await _cancel(reminders)
         await io.close()
         if app is not None:
             await app.stop()
     if app is not None and (message := backlog_message(app.backlog)) is not None:
         print(message, file=err)
     return code
+
+
+def _early_reminders(settings: Settings) -> Any:
+    """A `ReminderService` on the store alone, for `lucy listen` before its first wake
+    (only `wait_due` is used), or None when no reminder tool is enabled or the store
+    cannot be used (the app reports that when it starts)."""
+    from lucy.core.reminders import ReminderService
+    from lucy.tools.reminders import REMINDER_TOOLS, build_store, local_announcement
+
+    if not REMINDER_TOOLS & set(settings.tools.enabled):
+        return None
+    try:
+        store = build_store(settings, lambda: datetime.now(UTC))
+    except ValueError:
+        return None
+
+    class _NoEpisodes:
+        async def recent_episodes(self, session_id: str, limit: int) -> list[Any]:
+            return []
+
+    return ReminderService(store, _NoEpisodes(), local_announcement)
+
+
+async def _stop_early(rouser: asyncio.Task[None] | None, early: Any) -> None:
+    """Stop the before-the-first-wake scheduler and close its store (idempotent)."""
+    await _cancel(rouser)
+    if early is not None:
+        await early.store.close()

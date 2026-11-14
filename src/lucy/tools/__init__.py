@@ -8,7 +8,9 @@ port registry: `CATALOGUE` maps each tool name to a factory taking the settings
 it reads the system's time-zone database. The calendar tools (`calendar`,
 `add_calendar_event`, `edit_calendar_event`, `delete_calendar_event`; the last two
 always ask the user first) need none either: they use the macOS calendar store, and
-load EventKit only on their first call.
+load EventKit only on their first call. The reminder tools (`reminders`,
+`set_reminder`, `set_timer`, `cancel_reminder`) keep reminders in the SQLite memory
+database; building them fails when memory is not the SQLite store on a file.
 
 Every name in the catalogue has an options table in `ToolsSettings`
 (`lucy.core.config`), which is where unknown names and missing options are
@@ -25,11 +27,19 @@ import httpx
 
 from lucy.core.config import Settings
 from lucy.core.ports import Tool
+from lucy.core.reminders import ReminderStore
 from lucy.tools.calendar_changes import DeleteCalendarEventTool, EditCalendarEventTool
 from lucy.tools.calendar_events import AddCalendarEventTool, CalendarTool
 from lucy.tools.fetch_page import FetchPageTool
 from lucy.tools.local_time import TimeTool
 from lucy.tools.netguard import Resolver, system_resolver
+from lucy.tools.reminders import (
+    CancelReminderTool,
+    RemindersTool,
+    SetReminderTool,
+    SetTimerTool,
+    build_store,
+)
 from lucy.tools.weather import WeatherTool
 from lucy.tools.web_search import WebSearchTool
 from lucy.tools.wikipedia import WikipediaTool
@@ -61,6 +71,18 @@ CATALOGUE: Final[dict[str, Factory]] = {
     "delete_calendar_event": lambda s, _transport, _resolver, clock: DeleteCalendarEventTool(
         s.tools.calendar, clock=clock
     ),
+    "reminders": lambda s, _transport, _resolver, clock: RemindersTool(
+        s.tools.reminders, store=build_store(s, clock), clock=clock
+    ),
+    "set_reminder": lambda s, _transport, _resolver, clock: SetReminderTool(
+        s.tools.reminders, store=build_store(s, clock), clock=clock
+    ),
+    "set_timer": lambda s, _transport, _resolver, clock: SetTimerTool(
+        s.tools.reminders, store=build_store(s, clock), clock=clock
+    ),
+    "cancel_reminder": lambda s, _transport, _resolver, clock: CancelReminderTool(
+        s.tools.reminders, store=build_store(s, clock), clock=clock
+    ),
 }
 
 
@@ -70,16 +92,34 @@ def build_tools(
     transport: httpx.AsyncBaseTransport | None = None,
     resolver: Resolver = system_resolver,
     clock: Clock = lambda: datetime.now(UTC),
+    reminder_store: ReminderStore | None = None,
 ) -> list[Tool]:
     """The tools enabled in `settings`, in the order listed. Empty when none are.
 
     `transport` and `resolver` replace the network for tests. `clock` is "now" for
-    the `time` tool (the app passes its own clock).
+    the `time` tool (the app passes its own clock). With `reminder_store`, the
+    reminder tools share it and do not close it (the app owns it); without, each
+    opens its own.
     """
     tools: list[Tool] = []
     for name in settings.tools.enabled:
         factory = CATALOGUE.get(name)
         if factory is None:
             raise ValueError(f"unknown tool {name!r}; known tools: {', '.join(CATALOGUE)}")
+        if reminder_store is not None and name in _REMINDER_CLASSES:
+            tools.append(
+                _REMINDER_CLASSES[name](
+                    settings.tools.reminders, store=reminder_store, clock=clock, owns_store=False
+                )
+            )
+            continue
         tools.append(factory(settings, transport, resolver, clock))
     return tools
+
+
+_REMINDER_CLASSES: Final = {
+    "reminders": RemindersTool,
+    "set_reminder": SetReminderTool,
+    "set_timer": SetTimerTool,
+    "cancel_reminder": CancelReminderTool,
+}

@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from lucy.core.events import UserMessage
+from lucy.core.events import TimerFired, UserMessage
 from lucy.core.gateway import LLMGateway
 from lucy.core.types import LLMChunk
 from lucy.memory.extraction import (
@@ -183,6 +183,17 @@ async def test_a_turn_without_a_user_message_is_marked_without_a_model_call(
     report = await extractor.run(1)
     assert report.turns[0].skipped == "no user message" and llm.calls == []
     assert await unextracted(graph) == []
+
+
+async def test_a_proactive_reminder_turn_is_skipped_without_a_model_call(
+    memory: SQLiteMemoryStore, graph: SQLiteGraphStore, extractor: Extractor, llm: FakeLLM
+) -> None:
+    """ADR 0020: a reminder delivery (TimerFired, a code-authored reply) never becomes facts."""
+    await log(memory, TimerFired(session_id="s1", turn_id="t1", ts=DAY1, name="reminder"))
+    await turn(memory, "t1", None, "Reminder: call the bank about my mortgage.", ts=DAY1)
+    report = await extractor.run(3)
+    assert [t.skipped for t in report.turns] == ["no user message"] and llm.calls == []
+    assert await unextracted(graph) == [] and await graph.list_statements() == []
 
 
 async def test_the_running_turn_waits_until_it_ends(
