@@ -21,6 +21,21 @@ EARLIER_RESULT_CHARS: Final = 300
 """Characters kept after the first line of an earlier turn's tool result."""
 
 
+_KEPT_LAST_LINES: set[str] = set()
+
+
+def keep_when_shortened(line: str) -> None:
+    """Keep `line` when it ends a tool result that `shorten_tool_result` cuts.
+
+    For an instruction a tool closes its results with: cut off with the rest of an
+    earlier listing, the model stopped following it in later turns. Measured with
+    the calendar's `CHANGE_HINT`: "Delete the workout one." after a shortened
+    listing looped on empty thoughts in about 9 of 10 samples (or asked its own
+    "are you sure?"); with the hint kept it called the delete tool in 27 of 30.
+    """
+    _KEPT_LAST_LINES.add(line)
+
+
 def tool_message(result: ToolResult) -> Message:
     """The tool message that feeds `result` back to the LLM."""
     return Message(role=Role.TOOL, content=result.content, tool_call_id=result.call_id)
@@ -38,8 +53,13 @@ def shorten_tool_result(content: str, limit: int = EARLIER_RESULT_CHARS) -> str:
     """`content` cut to its first line plus about `limit` characters, then `SHORTENED_MARKER`.
 
     The first line is itself capped at `limit` characters. Content that is
-    already that short is returned unchanged.
+    already that short is returned unchanged. A last line registered with
+    `keep_when_shortened` is kept after the marker.
     """
+    body, newline, last = content.rpartition("\n")
+    if newline and last in _KEPT_LAST_LINES:
+        shortened = shorten_tool_result(body, limit)
+        return content if shortened == body else f"{shortened}\n{last}"
     first, _, rest = content.partition("\n")
     if len(first) > limit:
         head = _cut(first, limit)

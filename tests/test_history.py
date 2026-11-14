@@ -9,7 +9,12 @@ from lucy.core.events import (
     TurnEnded,
     UserMessage,
 )
-from lucy.core.history import SHORTENED_MARKER, events_to_messages, shorten_tool_result
+from lucy.core.history import (
+    SHORTENED_MARKER,
+    events_to_messages,
+    keep_when_shortened,
+    shorten_tool_result,
+)
 from lucy.core.types import Message, Role, ToolCall, ToolResult
 
 S = "s"
@@ -151,6 +156,20 @@ def test_shorten_tool_result_caps_a_long_first_line() -> None:
     one_line = "x" * 1000
     assert shorten_tool_result(one_line, 300) == "x" * 300 + " " + SHORTENED_MARKER
     assert shorten_tool_result("short", 300) == "short"
+
+
+def test_a_registered_last_line_survives_shortening() -> None:
+    hint = "Call the tool straight away (test hint)."
+    keep_when_shortened(hint)
+    long = "Header\n" + "word " * 200 + "\n" + hint
+    shortened = shorten_tool_result(long, 50)
+    assert shortened.startswith("Header\nword word")
+    assert shortened.endswith(f" {SHORTENED_MARKER}\n{hint}")
+    assert len(shortened) < 50 + len(hint) + 40
+    short = f"Header\nfew words\n{hint}"
+    assert shorten_tool_result(short, 50) == short  # nothing to cut: unchanged
+    unregistered = "Header\n" + "word " * 200 + "\nSome other last line."
+    assert "Some other last line." not in shorten_tool_result(unregistered, 50)
 
 
 # --- Spoken replies (ADR 0016) ------------------------------------------------------

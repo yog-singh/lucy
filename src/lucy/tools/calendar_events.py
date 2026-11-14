@@ -25,6 +25,7 @@ from datetime import UTC, datetime, time, timedelta, tzinfo
 from typing import Any, Final
 
 from lucy.core.config import CalendarSettings
+from lucy.core.history import keep_when_shortened
 from lucy.core.types import Risk, ToolOutput
 from lucy.tools.calendar_dates import (
     DateError,
@@ -121,7 +122,9 @@ CHANGE_HINT = (
 )
 """Closes calendar results when an edit or delete tool is offered. Gemma follows an
 instruction in a tool result more readily than one in a description (ADR 0013); without
-it, it asked its own "are you sure?" before the tool's confirmation."""
+it, it asked its own "are you sure?" before the tool's confirmation. Kept when an
+earlier turn's listing is shortened: cut off, it no longer worked."""
+keep_when_shortened(CHANGE_HINT)
 
 
 class _CalendarBase:
