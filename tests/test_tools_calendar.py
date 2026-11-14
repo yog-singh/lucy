@@ -16,7 +16,13 @@ from lucy.core.config import CalendarSettings, LLMSettings, Settings, ToolsSetti
 from lucy.core.types import Risk
 from lucy.tools import build_tools
 from lucy.tools.calendar_dates import DateError, resolve, when_text
-from lucy.tools.calendar_events import AddCalendarEventTool, CalendarTool, event_id, find_event
+from lucy.tools.calendar_events import (
+    CHANGE_HINT,
+    AddCalendarEventTool,
+    CalendarTool,
+    event_id,
+    find_event,
+)
 from lucy.tools.calendar_store import (
     Access,
     CalendarInfo,
@@ -522,6 +528,37 @@ def test_tiers_names_and_registration_without_eventkit() -> None:
     )
     built = build_tools(settings, clock=lambda: NOW)
     assert [t.name for t in built] == ["calendar", "add_calendar_event"]
+
+
+async def test_results_say_the_change_tools_confirm_only_when_one_is_offered() -> None:
+    kw = {"store": FakeStore(EVENTS), "clock": lambda: NOW, "local_zone": LONDON}
+    hinted = CalendarTool(changes_enabled=True, **kw)  # type: ignore[arg-type]
+    listed = (await hinted.run({"start": "friday"})).content
+    assert listed.splitlines()[-1] == CHANGE_HINT
+    assert "call that tool with its id straight away" in CHANGE_HINT
+    empty = (await hinted.run({"start": "friday", "query": "nothing"})).content
+    assert CHANGE_HINT not in empty
+    added = await AddCalendarEventTool(changes_enabled=True, **kw).run(  # type: ignore[arg-type]
+        {"title": "Call", "start": "friday 18:00"}
+    )
+    assert added.content.endswith(CHANGE_HINT)
+    assert CHANGE_HINT not in await read({"start": "friday"})
+
+    def enabled(*names: str) -> list[bool]:
+        settings = Settings(
+            llm=LLMSettings(roles={"chat": {"adapter": "fake"}}),
+            tools=ToolsSettings(enabled=list(names)),
+        )
+        built = build_tools(settings, clock=lambda: NOW)
+        return [t._changes_enabled for t in built if hasattr(t, "_changes_enabled")]
+
+    assert enabled("calendar", "add_calendar_event") == [False, False]
+    assert enabled("calendar", "add_calendar_event", "delete_calendar_event") == [
+        True,
+        True,
+        False,
+    ]
+    assert enabled("calendar", "edit_calendar_event")[0] is True
 
 
 def test_utc_clock_is_shown_in_local_time() -> None:

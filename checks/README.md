@@ -66,6 +66,18 @@ Baselines: 2026-11-13, 25 and 24 of 25 with the `system` layout, 25 and 25 with 
 
 Baselines: 2026-11-14, before the persona's passage on how a reply ends, offer 6 and menu 6 of 36 replies (two runs); after it, offer 3 and menu 5 of 54 (three runs), with no menus after factual answers.
 
+## confirm_once
+
+Whether Lucy calls `edit_calendar_event` or `delete_calendar_event` straight away and leaves the confirming to the tool (ADR 0006), instead of first asking "are you sure?" herself so that the user confirms twice. Scripted cases, each in a fresh session, through the real app and model, with the calendar tools on the in-memory fake store from `tests/test_tools_calendar.py`. The real calendar is never touched. Cases: delete what was just added, delete or move one event after a listing, delete with no listing yet, and two controls. In the controls, two meetings match, so Lucy should ask which one, and in a plain question about an event nothing should be changed. A case passes when its last turn ends in the tool's question (a `ConfirmationRequested` event) with no question of the model's own before it, or, for the controls, with no such event at all. `uv run python checks/confirm_once/confirm_once.py --reps 3 [--cases a,b]` takes about 2 minutes. Rows go to `data/checks/confirm_once/LABEL/rows.json`.
+
+A turn that ends in an error (no output even on the fallback role) is scored `silent`. To keep that cheap, the check alone gives every LLM role a first-output timeout of `--silent-after` seconds (default 15), so a silent turn costs about 15 s instead of about 100 s. The summary line for each case lists its failures by kind (`own-q`, `double`, `silent`, `guessed`, ...).
+
+Baselines, 2026-11-14:
+
+- Committed wording (the descriptions only say "The user is asked to confirm"): 11 of 18 (six cases × 3). Every failure was the model asking first ("Would you like me to delete...", "Are you sure...").
+- Descriptions saying "This tool itself asks the user to confirm..., so call it as soon as the user asks; never ask them first": 18 of 18, then 18 of 21. But `no_listing` went silent in 3 of 8 runs: after the calendar result, `chat` looped on the empty thought block (the hidden-loop guard) and `chat_deep` gave no output either. Dropped.
+- Committed descriptions, with the calendar and add results ending in `CHANGE_HINT` ("To edit or delete an event, call that tool with its id straight away: the tool itself asks the user to confirm, so do not ask them first.") whenever an edit or delete tool is enabled: `no_listing` 8 of 8, with no hidden loop. Full pass with 2 reps: 12 of 14. One `list_then_delete` went silent at the first step, before any tool call. One `list_then_move` asked a question because "this week" missed the dentist, so it was not an "are you sure". There were no "are you sure" questions, and the controls were 4 of 4.
+
 ## extract_eval
 
 Feeds scripted user turns with invented people and details through the real extraction and reconciliation pipeline (the config's `extraction` role and `[embedder]`) into a fresh database, then scores what was stored against expected statements, turns that must store nothing, and (scenario B) end-state checks such as superseded facts.
