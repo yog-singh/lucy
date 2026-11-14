@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from lucy.core.config import CalendarSettings, LLMSettings, Settings, ToolsSettings
+from lucy.core.history import SHORTENED_MARKER, shorten_tool_result
 from lucy.core.types import Risk
 from lucy.tools import build_tools
 from lucy.tools.calendar_dates import DateError, resolve, when_text
@@ -538,6 +539,8 @@ async def test_results_say_the_change_tools_confirm_only_when_one_is_offered() -
     assert "call that tool with its id straight away" in CHANGE_HINT
     empty = (await hinted.run({"start": "friday", "query": "nothing"})).content
     assert CHANGE_HINT not in empty
+    # An earlier turn's listing is shortened in history, but the hint survives.
+    assert shorten_tool_result(listed, 40).endswith(f"{SHORTENED_MARKER}\n{CHANGE_HINT}")
     added = await AddCalendarEventTool(changes_enabled=True, **kw).run(  # type: ignore[arg-type]
         {"title": "Call", "start": "friday 18:00"}
     )
