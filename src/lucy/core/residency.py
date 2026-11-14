@@ -15,7 +15,7 @@ embedder, the speech models) are never touched.
 
 Busy: Lucy is busy, and nothing is unloaded, while any of these holds:
 
-- a turn is in flight: from its `UserMessage` until its `TurnEnded` (seen on
+- a turn is in flight: from its `UserMessage` (or `TimerFired`) until its `TurnEnded` (seen on
   the bus); this covers the gaps between a tool call and the next model step,
   when no stream is open;
 - a voice client reports the user speaking or an utterance being transcribed
@@ -79,7 +79,7 @@ from dataclasses import dataclass, field
 from typing import Final, Literal, Protocol
 
 from lucy.core.bus import EventBus
-from lucy.core.events import SpeechActivity, TurnEnded, UserMessage
+from lucy.core.events import SpeechActivity, TimerFired, TurnEnded, UserMessage
 from lucy.core.gateway import LLMGateway
 from lucy.core.ports import LLM, ResidentLLM
 from lucy.core.types import Message, Prefill, PromptPrefix, Role
@@ -211,7 +211,7 @@ class Residency:
         self._closed = False
         self.records: deque[CycleRecord] = deque(maxlen=100)
         """The latest cycles, oldest first."""
-        self._subscription = bus.subscribe(UserMessage, TurnEnded, SpeechActivity)
+        self._subscription = bus.subscribe(UserMessage, TimerFired, TurnEnded, SpeechActivity)
         gateway.on_request(self._on_request)
         gateway.set_foreground_gate(self.before_foreground)
 
@@ -228,8 +228,11 @@ class Residency:
     # --- Signals --------------------------------------------------------------
 
     def handle(self, event: object) -> None:
-        """Take note of a bus event (turn start and end, speech activity)."""
-        if isinstance(event, UserMessage):
+        """Take note of a bus event (turn start and end, speech activity).
+
+        A `TimerFired` starts a turn as a `UserMessage` does (ADR 0020). A
+        `TurnEnded` with no start seen is harmless: the count never goes below zero."""
+        if isinstance(event, UserMessage | TimerFired):
             self._turns[event.session_id] = self._turns.get(event.session_id, 0) + 1
             self._last_session = event.session_id
             if self._cycle is not None:

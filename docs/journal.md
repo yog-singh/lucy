@@ -2,6 +2,11 @@
 
 Dated notes on what was built, what failed and what changed. Newest first.
 
+## 2026-11-14: reminders are delivered
+
+- Reminders now fire (ADR 0020): `ReminderService` claims due ones for a client, the orchestrator says them in a proactive turn with no model call, and `lucy chat` prints them above the prompt; voice delivery comes next. Built by a sub-agent; not yet committed.
+- Reminders are now spoken in `lucy voice` and `lucy listen` (`VoiceSession.announce`, `WakeListener.rouse`); verified with fakes and audio files only, not by ear.
+
 ## 2026-11-14: confirming dangerous tools
 
 - Confirmation flow for dangerous tools built by a sub-agent (amendment to ADR 0006): the question is the tool's preview, spoken by code; only the next plain yes runs the logged call, decided without the model. No real tool uses it yet. Not yet committed.

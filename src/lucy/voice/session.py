@@ -33,6 +33,17 @@ as a `UserMessage` (or turned out empty, failed, or the sound was discarded),
 and `ended` when the session stops. The model residency policy uses it to keep
 the model in memory while the user speaks.
 
+Proactive turns (ADR 0020): `announce` speaks a turn Lucy starts herself, such
+as a due reminder. It takes the session's floor (held by every utterance and
+its turn), waits until the session is idle (listening, the user not speaking,
+nothing being transcribed), only then calls `fire` to claim what is due, and
+publishes the resulting `TimerFired` through the same path as a `UserMessage`:
+the turn is registered as expected before publishing, so its events are never
+given to a user turn, and its sentences are spoken through the same player,
+with the same barge-in. Frames are dropped while announcing (half-duplex), and
+the session listens again afterwards as after a reply. `deliver_reminders`
+runs that in a loop for a client.
+
 Timings: each turn's moments (speech end, endpoint, transcript, first text,
 first sentence, first TTS audio, first audio played, playback end) are taken on
 the `AudioIO` clock, logged as one line, and appended as one JSON line to
@@ -45,7 +56,7 @@ import asyncio
 import json
 import logging
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -62,6 +73,7 @@ from lucy.core.events import (
     SentenceReady,
     SpeechActivity,
     TextDelta,
+    TimerFired,
     ToolStarted,
     TurnEnded,
     UserMessage,
@@ -319,6 +331,10 @@ class VoiceSession:
         self._bus_closed = False
         self._background: set[asyncio.Task[None]] = set()
         self._activity: str | None = None
+        self._floor = asyncio.Lock()  # held by each utterance and each announcement
+        self._changed = asyncio.Event()  # set when the state or the speech activity changes
+        self._announcing = False
+        self._running = asyncio.Event()
         self.timings: list[TurnTimings] = []
 
     # --- Public surface ------------------------------------------------------------
@@ -335,6 +351,69 @@ class VoiceSession:
     def hearing_speech(self) -> bool:
         """Whether the user is speaking now (an utterance has started and not ended)."""
         return self._activity == "speaking"
+
+    @property
+    def idle(self) -> bool:
+        """Listening, with the user not speaking and nothing being transcribed."""
+        return (
+            self._state == VoiceState.LISTENING
+            and not self.hearing_speech
+            and self._activity != "transcribing"
+        )
+
+    async def announce(
+        self,
+        fire: Callable[[str], Awaitable[TimerFired | None]],
+        *,
+        cue: Callable[[], Awaitable[object]] | None = None,
+    ) -> bool:
+        """Speak a proactive turn (see the module docstring); returns whether one was said.
+
+        Waits for the floor and for the session to be idle, then calls
+        `fire(session_id)`. None from `fire` (nothing due, or a confirmation
+        question open) leaves the session as it was. `cue`, if given, is awaited
+        after a successful `fire` and before the turn is published (the wake
+        listener's chime)."""
+        await self._running.wait()  # the turn events are routed only once `run` subscribed
+        while True:
+            if self._state == VoiceState.STOPPED or self._stopping:
+                return False
+            async with self._floor:
+                if self.idle:
+                    self._announcing = True  # from now on frames are dropped
+                    try:
+                        event = await fire(self._session_id)
+                        if event is None:
+                            return False
+                        self._set_state(VoiceState.THINKING)
+                        if cue is not None:
+                            try:
+                                await cue()
+                            except Exception:
+                                logger.exception("the announcement cue failed")
+                        now = self._io.now()
+                        timings = TurnTimings(
+                            session_id=self._session_id,
+                            at=self._wall_clock().isoformat(),
+                            speech_start=now,
+                            speech_end=now,
+                            endpoint=now,
+                            utterance_s=0.0,
+                        )
+                        try:
+                            await self._converse(event, timings)
+                        finally:
+                            if not self._stopping:
+                                self._listen_again(gate=True)
+                        logger.info("proactive turn %s: %s", timings.turn_id, timings.outcome)
+                        return True
+                    finally:
+                        self._announcing = False
+            self._changed.clear()
+            if not self.idle:
+                await self._changed.wait()
+            else:
+                await asyncio.sleep(0)
 
     def forget_audio(self) -> None:
         """Reset the VAD and the endpointer, dropping any partial utterance (the wake
@@ -353,6 +432,7 @@ class VoiceSession:
         self._main = asyncio.create_task(self._listen(), name="lucy-voice-listen")
         self._set_state(VoiceState.LISTENING)
         await self._speech_activity("idle")
+        self._running.set()
         try:
             await self._main
         except asyncio.CancelledError:
@@ -399,6 +479,7 @@ class VoiceSession:
     def _set_state(self, state: VoiceState) -> None:
         if state != self._state or state == VoiceState.LISTENING:
             self._state = state
+            self._changed.set()
             try:
                 self._ui.state(state)
             except Exception:
@@ -426,7 +507,7 @@ class VoiceSession:
             await frames.aclose()
 
     async def _on_frame(self, frame: Frame) -> None:
-        if frame.time <= self._gate_until:
+        if self._announcing or frame.time <= self._gate_until:
             return
         probability = self._vad(frame.audio)
         for event in self._endpointer.feed(frame.audio.data, probability, frame.time):
@@ -447,6 +528,7 @@ class VoiceSession:
         if state == self._activity or self._bus.closed:
             return
         self._activity = state
+        self._changed.set()
         try:
             await self._bus.publish(SpeechActivity(session_id=self._session_id, state=state))
         except RuntimeError:  # the bus has closed: Lucy is stopping
@@ -465,6 +547,10 @@ class VoiceSession:
     # --- One turn ----------------------------------------------------------------------
 
     async def _utterance(self, utterance: UtteranceComplete) -> None:
+        async with self._floor:
+            await self._utterance_turn(utterance)
+
+    async def _utterance_turn(self, utterance: UtteranceComplete) -> None:
         timings = TurnTimings(
             session_id=self._session_id,
             at=self._wall_clock().isoformat(),
@@ -493,13 +579,17 @@ class VoiceSession:
                 return
             self._ui.user(text)
             replied = True
-            await self._converse(text, timings)
+            await self._converse(
+                UserMessage(session_id=self._session_id, text=text, source="voice"), timings
+            )
         finally:
             await self._speech_activity("idle")
             self._record(timings)
             self._listen_again(gate=replied)
 
-    async def _converse(self, text: str, timings: TurnTimings) -> None:
+    async def _converse(self, inbound: UserMessage | TimerFired, timings: TurnTimings) -> None:
+        """Publish `inbound` and speak its turn. The turn is registered as expected
+        before publishing: turns of a session run in publication order."""
         turn = _Turn()
         io = self._io
 
@@ -527,9 +617,7 @@ class VoiceSession:
         self._set_state(VoiceState.THINKING)
         reply: list[str] = []
         try:
-            await self._bus.publish(
-                UserMessage(session_id=self._session_id, text=text, source="voice")
-            )
+            await self._bus.publish(inbound)
             await self._speech_activity("idle")
             while not turn.interrupted:
                 event = await turn.events.get()
@@ -671,3 +759,34 @@ class VoiceSession:
                 file.write(json.dumps(timings.to_json()) + "\n")
         except OSError as exc:
             logger.warning("cannot write voice timings to %s: %s", self._timings_path, exc)
+
+
+class ReminderSource(Protocol):
+    """What `deliver_reminders` needs (`lucy.core.reminders.ReminderService`)."""
+
+    poll: float
+
+    async def wait_due(self) -> None: ...
+
+    async def fire(self, session_id: str) -> TimerFired | None: ...
+
+
+async def deliver_reminders(
+    session: VoiceSession,
+    service: ReminderSource,
+    *,
+    cue: Callable[[], Awaitable[object]] | None = None,
+) -> None:
+    """Speak due reminders in `session` until cancelled, the bus closes or the session
+    stops (ADR 0020). No grace before claiming: a voice client should win over chat."""
+    while session.state != VoiceState.STOPPED:
+        try:
+            await service.wait_due()
+            await session.announce(service.fire, cue=cue)
+        except asyncio.CancelledError:
+            raise
+        except RuntimeError:  # the bus is closed: Lucy has stopped
+            return
+        except Exception:
+            logger.exception("could not deliver a reminder")
+            await asyncio.sleep(service.poll)

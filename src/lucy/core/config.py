@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import tomllib
 from pathlib import Path
-from typing import Any, ClassVar, Literal, Self
+from typing import Any, ClassVar, Final, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
@@ -246,6 +246,35 @@ class DeleteCalendarEventSettings(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
 
+class RemindersSettings(BaseModel):
+    """The reminder tools (`reminders`, `set_reminder`, `set_timer`, `cancel_reminder`).
+    Reminders are kept in the SQLite memory database, so these tools need the SQLite
+    memory store on a file."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    max_chars: int = Field(default=6000, ge=200)
+    """Longest list handed to the model, in characters."""
+
+
+class SetReminderSettings(BaseModel):
+    """The `set_reminder` tool. Its options are in `[tools.reminders]`."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+
+class SetTimerSettings(BaseModel):
+    """The `set_timer` tool. Its options are in `[tools.reminders]`."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+
+class CancelReminderSettings(BaseModel):
+    """The `cancel_reminder` tool. Its options are in `[tools.reminders]`."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+
 class ToolsSettings(BaseModel):
     """Which tools the chat model may use, and each tool's options.
 
@@ -273,6 +302,10 @@ class ToolsSettings(BaseModel):
     delete_calendar_event: DeleteCalendarEventSettings = Field(
         default_factory=DeleteCalendarEventSettings
     )
+    reminders: RemindersSettings = Field(default_factory=RemindersSettings)
+    set_reminder: SetReminderSettings = Field(default_factory=SetReminderSettings)
+    set_timer: SetTimerSettings = Field(default_factory=SetTimerSettings)
+    cancel_reminder: CancelReminderSettings = Field(default_factory=CancelReminderSettings)
 
     @classmethod
     def known_tools(cls) -> list[str]:
@@ -379,6 +412,10 @@ class ResidencySettings(BaseModel):
     """Outside a voice session, also this long since the last turn ended."""
     min_size_gb: float | None = Field(default=None, gt=0)
     """Optional: unload only when the loaded model takes at least this many GB."""
+
+
+DEFAULT_MEMORY: Final = AdapterConfig(adapter="sqlite", options={"path": "data/lucy.db"})
+"""The memory store used when the settings have no `[memory]` section."""
 
 
 class Settings(BaseModel):

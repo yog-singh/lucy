@@ -40,6 +40,8 @@ Voice-activity detection, endpointing, audio I/O and playback are client-side si
 
 Built on 2026-11-13 ([ADR 0018](adr/0018-wake-word-listener.md)) ahead of stage 2, because it does not depend on barge-in. It uses the pretrained "hey jarvis" model; a custom "Hey Lucy" model and running at login are still to do. Verified through audio files only.
 
+Due reminders (ADR 0020) are spoken in `lucy voice` and `lucy listen` as soon as Lucy is idle, never over the user or another reply. In `lucy listen` the wake chime plays first, the follow-up window opens afterwards so the user can answer without the wake phrase, and a reminder due before the first wake starts Lucy on its own (paying the model-loading delay).
+
 | | Result |
 |---|---|
 | Waiting footprint | 1.75% of one core, 67 MB (idle `lucy voice`: 1,604 MB) |

@@ -66,7 +66,7 @@ Inputs and outputs are typed events on an async bus.
 Every event carries a `schema_version`. `AssistantMessage` is the durable record of one LLM step (delivered text, tool calls, interrupted or not); `TextDelta` and `SentenceReady` are for live clients and are not persisted.
 
 - An `Interrupt` cancels the running turn, which gives barge-in.
-- A turn triggered by `TimerFired` instead of `UserMessage` is how Lucy speaks first (reminders, follow-ups).
+- A turn triggered by `TimerFired` instead of `UserMessage` is how Lucy speaks first ([ADR 0020](adr/0020-reminders-and-proactive-turns.md)). It is queued behind any running turn, makes no model call, and says code-authored text from the handler for the timer's name (reminders today). The client decides when: it calls `ReminderService.fire` when it is idle and publishes the returned `TimerFired`. Reminders are marked delivered after they are said, so a crash can repeat one but not lose it.
 - The persisted event stream is the episode log, so memory and debugging read the same record.
 
 ### Turn lifecycle ([ADR 0004](adr/0004-turn-lifecycle-and-stateless-orchestrator.md))

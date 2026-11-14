@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 import string
 from collections.abc import Sequence
+from datetime import datetime
 from typing import Final, Literal
 
 from lucy.core.events import (
@@ -19,6 +20,7 @@ from lucy.core.events import (
     ConfirmationRequested,
     ConfirmationResolved,
     PlaybackInterrupted,
+    TimerFired,
     TurnEnded,
     UserMessage,
 )
@@ -76,6 +78,10 @@ def pending_confirmation(
     not resolved, `message` is the first user message after it, `message` was
     typed or spoken (not a memory correction), and `message` arrived after the
     turn that asked the question had completed.
+
+    A `TimerFired` logged after the request (Lucy spoke on her own, ADR 0020)
+    also ends it: the user's next words may answer the reminder, not the
+    question, so a "yes" then can never run the older call.
     """
     if message.source not in ("text", "voice"):
         return None
@@ -87,6 +93,8 @@ def pending_confirmation(
     assert isinstance(request, ConfirmationRequested)
     later = episodes[index + 1 :]
     if any(isinstance(e, ConfirmationResolved) and e.request_id == request.id for e in later):
+        return None
+    if any(isinstance(e, TimerFired) for e in later):
         return None
     first_user = next((e for e in later if isinstance(e, UserMessage)), None)
     if first_user is not None and first_user.id != message.id:
@@ -116,3 +124,30 @@ def outcome_for(
     if message.ts > request.expires_at:
         return "expired"
     return {"yes": "confirmed", "no": "declined", "other": "superseded"}[classify(message.text)]
+
+
+def unresolved_request(episodes: Sequence[AnyEvent]) -> ConfirmationRequested | None:
+    """The last request in `episodes` if nothing has ended it yet: no
+    `ConfirmationResolved` for it, no user message and no `TimerFired` after it.
+    It may have expired."""
+    requests = [i for i, e in enumerate(episodes) if isinstance(e, ConfirmationRequested)]
+    if not requests:
+        return None
+    request = episodes[requests[-1]]
+    assert isinstance(request, ConfirmationRequested)
+    for event in episodes[requests[-1] + 1 :]:
+        if isinstance(event, ConfirmationResolved) and event.request_id == request.id:
+            return None
+        if isinstance(event, UserMessage | TimerFired):
+            return None
+    return request
+
+
+def open_request(episodes: Sequence[AnyEvent], now: datetime) -> ConfirmationRequested | None:
+    """The request the user may still be answering at `now`: unresolved, unanswered
+    and unexpired (ADR 0020). Lucy says nothing on her own while there is one, so a
+    reminder never lands between a question and its answer."""
+    request = unresolved_request(episodes)
+    if request is None or now > request.expires_at:
+        return None
+    return request

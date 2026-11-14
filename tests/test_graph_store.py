@@ -81,7 +81,7 @@ def count(path: Path, table: str) -> int:
 
 
 async def test_fresh_database_has_graph_schema_and_user(graph: SQLiteGraphStore, path: Path):
-    assert query(path, "PRAGMA user_version")[0][0] == len(migrations.MIGRATIONS) == 5
+    assert query(path, "PRAGMA user_version")[0][0] == len(migrations.MIGRATIONS) == 6
     user = await graph.user_entity()
     assert (user.id, user.type, user.name, user.aliases, user.summary) == (
         USER_ENTITY_ID,
@@ -118,7 +118,7 @@ async def test_migration_3_to_4_preserves_episodes_traces_and_jobs(path: Path, c
         assert (await graph.user_entity()).name == "User"
         unextracted = await graph.unextracted_episodes()
         assert [e.event for e in unextracted] == events
-    assert query(path, "PRAGMA user_version")[0][0] == 5
+    assert query(path, "PRAGMA user_version")[0][0] == len(migrations.MIGRATIONS)
     async with SQLiteMemoryStore(path) as store:
         assert await store.recent_episodes("s", 10) == events
         assert await store.get_trace("t") == _trace("t")

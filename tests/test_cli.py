@@ -2,8 +2,10 @@ import asyncio
 import io
 import logging
 import os
-from collections.abc import AsyncIterator, Iterator, Sequence
+from collections.abc import AsyncIterator, Callable, Iterator, Sequence
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 from prompt_toolkit.input import create_pipe_input
@@ -12,10 +14,12 @@ from prompt_toolkit.output import DummyOutput
 from lucy.app import LucyApp
 from lucy.clients import cli
 from lucy.clients.cli import ChatLoop, ReadLine, StdinReader, TerminalReader
-from lucy.core.config import AdapterConfig, LLMSettings, Settings
+from lucy.core.config import AdapterConfig, LLMSettings, Settings, ToolsSettings
 from lucy.core.events import AssistantMessage, TurnEnded
 from lucy.core.registry import Registry
+from lucy.core.reminders import ReminderKind, ReminderService
 from lucy.core.types import FinishReason, LLMChunk, ToolCall
+from lucy.memory.sqlite_reminders import SQLiteReminderStore
 from lucy.memory.sqlite_store import SQLiteMemoryStore
 from tests.fakes import FakeLLM, Pause, Raise, Script, adapter_for
 
@@ -400,3 +404,136 @@ def test_invalid_config_exits_2(
     path.write_text("[llm.roles]\n")
     assert cli.main(["chat", "--config", str(path)]) == 2
     assert "chat" in capsys.readouterr().err
+
+
+# --- Reminders (ADR 0020) ------------------------------------------------------------
+
+
+class ReminderHarness(Harness):
+    """A chat on an app with a reminder tool enabled, so it has a `ReminderService`."""
+
+    pause: Pause
+
+    def __init__(self, db: Path, responses: Sequence[Script]) -> None:
+        super().__init__(db, responses)
+        self.app.settings = self.app.settings.model_copy(
+            update={"tools": ToolsSettings(enabled=["reminders"])}
+        )
+
+    def chat_with(self, read_line: ReadLine, **options: Any) -> ChatLoop:
+        options.setdefault("proactive_grace", 0.0)
+        return ChatLoop(self.app, "cli", read_line=read_line, out=self.out, err=self.err, **options)
+
+    @property
+    def service(self) -> ReminderService:
+        assert self.app.reminders is not None
+        return self.app.reminders
+
+
+@pytest.fixture
+async def reminder_harness(tmp_path: Path) -> AsyncIterator[ReminderHarness]:
+    pause = Pause()
+    harness = ReminderHarness(tmp_path / "lucy.db", [[pause, *reply("Hello.")]])
+    harness.pause = pause
+    await harness.app.start()
+    harness.service.poll = 0.02
+    yield harness
+    await harness.app.stop()
+
+
+async def until(condition: Callable[[], bool]) -> None:
+    async with asyncio.timeout(TIMEOUT):
+        while not condition():
+            await asyncio.sleep(0.01)
+
+
+def now() -> datetime:
+    return datetime.now(UTC)
+
+
+async def test_a_reminder_prints_while_waiting_at_the_prompt(reminder_harness) -> None:
+    h = reminder_harness
+    reader = ScriptedInput([], block_at_end=True)
+    chat = h.chat_with(reader)
+    task = asyncio.create_task(chat.run())
+    await asyncio.wait_for(reader.waiting.wait(), TIMEOUT)
+    await h.service.store.add(ReminderKind.REMINDER, "call the bank", now())
+    await until(lambda: "bank" in h.out.getvalue())
+    await until(lambda: h.out.getvalue().endswith(cli.PROMPT))
+    assert h.out.getvalue() == "you> \nlucy> Reminder: call the bank.\nyou> "
+    chat.interrupt()
+    assert await asyncio.wait_for(task, TIMEOUT) == 0
+    types = [e.type for e in await h.app.memory.recent_episodes("cli", 20)]
+    assert types == ["timer_fired", "assistant_message", "turn_ended"]
+
+
+async def test_reminders_missed_while_off_are_delivered_at_start(reminder_harness) -> None:
+    h = reminder_harness
+    await h.service.store.add(ReminderKind.REMINDER, "call the bank", now() - timedelta(hours=3))
+    lines: list[str] = []
+
+    async def above(text: str) -> None:
+        lines.append(text)
+
+    reader = ScriptedInput([], block_at_end=True)
+    chat = h.chat_with(reader, reader_prompts=True, print_above=above)
+    task = asyncio.create_task(chat.run())
+    await until(lambda: bool(lines))
+    assert lines[0].startswith("lucy> A reminder was due") and "call the bank" in lines[0]
+    chat.interrupt()
+    await asyncio.wait_for(task, TIMEOUT)
+
+
+async def test_a_reminder_never_interleaves_with_a_running_turn(reminder_harness) -> None:
+    h = reminder_harness
+    pause = h.pause
+    reader = ScriptedInput(["hi"], block_at_end=True)
+    chat = h.chat_with(reader)
+    task = asyncio.create_task(chat.run())
+    await asyncio.wait_for(pause.reached.wait(), TIMEOUT)
+    await h.service.store.add(ReminderKind.REMINDER, "call the bank", now())
+    await asyncio.sleep(0.1)  # due, but the floor is the user's turn
+    assert "bank" not in h.out.getvalue()
+    pause.release.set()
+    await until(lambda: "bank" in h.out.getvalue())
+    out = h.out.getvalue()
+    assert out.startswith("you> lucy> Hello.\n")
+    assert "\nlucy> Reminder: call the bank.\n" in out
+    chat.interrupt()
+    await asyncio.wait_for(task, TIMEOUT)
+
+
+async def test_a_voice_client_wins_during_the_grace(reminder_harness, tmp_path: Path) -> None:
+    h = reminder_harness
+    reader = ScriptedInput([], block_at_end=True)
+    chat = h.chat_with(reader, proactive_grace=0.3)
+    task = asyncio.create_task(chat.run())
+    await asyncio.wait_for(reader.waiting.wait(), TIMEOUT)
+    saved = await h.service.store.add(ReminderKind.REMINDER, "call the bank", now())
+    async with SQLiteReminderStore(tmp_path / "lucy.db") as other:
+        voice = ReminderService(other, h.app.memory, lambda rs, at: "", poll=0.02)
+        await asyncio.sleep(0.05)  # the chat has seen it due and is in its grace
+        assert await voice.fire("voice") is not None
+        await asyncio.sleep(0.5)
+        assert "bank" not in h.out.getvalue()
+        row = await other.get(saved.id)
+        assert row is not None and row.claimed_by == voice.owner
+    chat.interrupt()
+    await asyncio.wait_for(task, TIMEOUT)
+
+
+async def test_terminal_reader_prints_above_and_keeps_the_typed_line() -> None:
+    from prompt_toolkit.data_structures import Size
+    from prompt_toolkit.output.vt100 import Vt100_Output
+
+    screen = io.StringIO()
+    output = Vt100_Output(screen, lambda: Size(rows=24, columns=80), term="xterm")
+    with create_pipe_input() as pipe:
+        reader = TerminalReader(input=pipe, output=output)
+        line = asyncio.create_task(reader.readline())
+        pipe.send_text("hal")
+        await asyncio.sleep(0.1)
+        await asyncio.wait_for(reader.print_above("lucy> Reminder: call the bank."), TIMEOUT)
+        pipe.send_text("f\r")
+        assert await asyncio.wait_for(line, TIMEOUT) == "half"
+    assert "lucy> Reminder: call the bank.\n" in screen.getvalue()

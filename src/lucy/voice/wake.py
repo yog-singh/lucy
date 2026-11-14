@@ -16,6 +16,15 @@ always-on process in front of a server:
   the wake phrase alone) the session keeps listening for `followup_s`; when
   that passes with no speech, the listener goes back to waiting.
 
+Proactive turns (a due reminder, ADR 0020) are spoken by the session's
+`announce` whatever the listener's state. While the session thinks or speaks
+the wake stage is not fed (it is reset), so Lucy cannot wake herself; when the
+session listens again after a proactive turn that came while waiting, the
+listener opens the follow-up window as after a reply (awake, no chime), so the
+user can answer without the wake phrase. `cue` plays the wake chime before the
+reminder. `rouse` builds the session before the first wake without a wake
+phrase (a reminder came due), and the listener stays waiting.
+
 States: waiting (only capture and the wake-word models run), awake (the
 session's own listening, thinking and speaking). Half-duplex is the session's:
 while it thinks or speaks it reads no frames, so neither the wake word nor
@@ -231,13 +240,12 @@ class _SessionIO:
 class _ObservingUI:
     """Passes the session's UI calls on, telling the listener about state changes."""
 
-    def __init__(self, ui: VoiceUI, on_state: Callable[[VoiceState], None]) -> None:
+    def __init__(self, ui: VoiceUI, on_state: Callable[[VoiceState], VoiceState]) -> None:
         self._ui = ui
         self._on_state = on_state
 
     def state(self, state: VoiceState) -> None:
-        self._on_state(state)
-        self._ui.state(state)
+        self._ui.state(self._on_state(state))
 
     def user(self, text: str) -> None:
         self._ui.user(text)
@@ -281,6 +289,8 @@ class WakeListener:
         self._main: asyncio.Task[None] | None = None
         self._stopping = False
         self._chimes: set[asyncio.Task[None]] = set()
+        self._roused = False
+        self._proactive = False  # the session spoke on its own while we were waiting
         self.wakes: list[float] = []  # capture time of each detection
         self.sleeps: list[float] = []  # when each return to waiting happened
 
@@ -307,6 +317,27 @@ class WakeListener:
 
     def interrupt(self) -> bool:
         return self._session.interrupt() if self._session is not None else False
+
+    def rouse(self) -> None:
+        """Build the session now, without a wake phrase, if it is not built yet (a reminder
+        came due before the first wake). The listener stays waiting."""
+        if self._session is None:
+            self._roused = True
+
+    async def cue(self) -> None:
+        """The sound before a proactive turn: the wake chime (if chimes are on), played to
+        its end."""
+        if not self._config.chime:
+            return
+        sound = chime(WAKE_NOTES)
+
+        async def one() -> AsyncIterator[AudioChunk]:
+            yield sound
+
+        try:
+            await self._io.play(one())
+        except Exception as exc:
+            logger.warning("could not play the chime: %s", exc)
 
     def stop(self) -> None:
         self._stopping = True
@@ -342,10 +373,25 @@ class WakeListener:
         except Exception:
             logger.exception("the voice UI failed")
 
-    def _session_state_changed(self, state: VoiceState) -> None:
+    def _session_state_changed(self, state: VoiceState) -> VoiceState:
+        """Track the session's state; returns the state to show."""
         self._session_state = state
-        if state == VoiceState.LISTENING and self._state == ListenerState.AWAKE:
+        if self._state == ListenerState.WAITING and state in (
+            VoiceState.THINKING,
+            VoiceState.SPEAKING,
+        ):
+            self._proactive = True  # only `announce` turns while waiting
+        elif state == VoiceState.LISTENING and self._state == ListenerState.WAITING:
+            if self._proactive:  # open the follow-up window, as after a reply
+                self._proactive = False
+                self._state = ListenerState.AWAKE
+                self._stage.reset()
+                self._deadline = self._io.now() + self._config.followup_s
+        elif state == VoiceState.LISTENING and self._state == ListenerState.AWAKE:
             self._deadline = self._io.now() + self._config.followup_s
+        if state == VoiceState.LISTENING and self._state == ListenerState.WAITING:
+            return VoiceState.WAITING  # the session was built by `rouse`
+        return state
 
     def _session_idle(self) -> bool:
         if self._session is None:
@@ -357,6 +403,13 @@ class WakeListener:
         buffer, then live frames until the follow-up window passes."""
         async for frame in source:
             if self._state == ListenerState.WAITING:
+                if self._session is None and self._roused:
+                    self._roused = False  # one frame starts the session; we keep waiting
+                    yield frame
+                    continue
+                if self._session is not None and self._session_state != VoiceState.LISTENING:
+                    self._stage.reset()  # a proactive turn: never wake on Lucy's own voice
+                    continue
                 if frame.time <= self._quiet_until:
                     continue
                 if not self._stage.feed(frame):
