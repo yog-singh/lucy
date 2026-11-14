@@ -17,6 +17,9 @@ from lucy.core.types import FinishReason, Message
 class StepFallback(BaseModel):
     """How a step was served when its role's stream produced nothing (`LLMGateway`).
 
+    It records either a fallback to another role or a retry of the same role
+    (`served_by` equal to `role`).
+
     `served_by` is the fallback role that was asked instead; `reason` says why
     the first attempt was given up; `lost_seconds` is the time spent on it.
     `at` is when the fallback attempt started.
@@ -38,7 +41,8 @@ class StepTrace(BaseModel):
     offered. `first_token_at` is when the first text or tool call arrived;
     `finish_reason` is unset if the model never reported one (for example
     because the step was interrupted). `fallback` is set when the role's stream
-    produced nothing and another role was asked instead.
+    produced nothing and another role was asked instead; `retries` lists the
+    times the same role was asked again first (`served_by` equal to `role`).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -51,6 +55,7 @@ class StepTrace(BaseModel):
     ended_at: AwareDatetime
     finish_reason: FinishReason | None = None
     fallback: StepFallback | None = None
+    retries: list[StepFallback] = Field(default_factory=list)
 
 
 class TurnTrace(BaseModel):

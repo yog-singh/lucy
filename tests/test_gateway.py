@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from lucy.core import gateway as gateway_module
 from lucy.core.config import LLMSettings
 from lucy.core.gateway import (
+    DEFAULT_SILENT_RETRIES,
     GatewayError,
     LLMGateway,
     Preempted,
@@ -525,12 +526,18 @@ SILENT = [LLMChunk(finish_reason=FinishReason.LENGTH)]
 
 
 def fallback_gateway(
-    chat: FakeLLM, deep: FakeLLM, *, timeout: float | None = None, **extra: FakeLLM
+    chat: FakeLLM,
+    deep: FakeLLM,
+    *,
+    timeout: float | None = None,
+    retries: int = 0,
+    **extra: FakeLLM,
 ) -> LLMGateway:
     return LLMGateway(
         {"chat": chat, "chat_deep": deep, **extra},
         fallbacks={"chat": "chat_deep"},
         first_output_timeouts={"chat": timeout} if timeout is not None else None,
+        silent_retries={"chat": retries},
     )
 
 
@@ -601,6 +608,7 @@ async def test_both_silent_raises_a_readable_error() -> None:
         {"chat": chat, "chat_deep": deep},
         fallbacks={"chat": "chat_deep"},
         first_output_timeouts={"chat_deep": 0.05},
+        silent_retries={"chat": 0},
     )
     with pytest.raises(SilentStreamError, match="neither did its fallback role 'chat_deep'"):
         async with asyncio.timeout(1):
@@ -773,6 +781,7 @@ async def test_after_tool_role_uses_its_own_fallback_settings() -> None:
         {"chat": chat, "chat_deep": deep, "spare": spare},
         after_tool={"chat": "chat_deep"},
         fallbacks={"chat_deep": "spare"},
+        silent_retries={"chat_deep": 0},
     )
     assert [c.text async for c in gateway.stream("chat", TOOL_RESULT)] == ["spare"]
     assert fallbacks_in_context()[-1].role == "chat_deep"
@@ -807,6 +816,7 @@ async def test_request_listeners_see_every_adapter_request() -> None:
         {"chat": chat, "chat_deep": deep},
         fallbacks={"chat": "chat_deep"},
         first_output_timeouts={"chat": 5},
+        silent_retries={"chat": 0},
     )
     seen: list[tuple[str, object]] = []
     gateway.on_request(lambda role, llm: seen.append((role, llm)))
@@ -845,3 +855,94 @@ async def test_a_failing_gate_is_ignored(caplog: pytest.LogCaptureFixture) -> No
     gateway.set_foreground_gate(gate)
     assert await drain(gateway.stream("chat", [])) == "hi"
     assert "foreground gate failed" in caplog.text
+
+
+# --- Silent-stream retries -------------------------------------------------------
+
+
+async def test_a_silent_stream_is_retried_on_its_own_role_first(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    chat = FakeLLM([SILENT, [LLMChunk(text="Second try.")]])
+    deep = FakeLLM([])
+    gateway = fallback_gateway(chat, deep, retries=2)
+    assert [c.text for c in await chunks_of(gateway)] == ["Second try."]
+    assert chat.calls == [HELLO, HELLO] and deep.calls == []
+    [record] = fallbacks_in_context()
+    assert (record.role, record.served_by) == ("chat", "chat")
+    assert "asking it again (retry 1 of 2" in caplog.text
+
+
+async def test_retries_exhausted_then_fallback() -> None:
+    chat = FakeLLM([SILENT, SILENT, SILENT])
+    deep = FakeLLM([[LLMChunk(text="Deep.")]])
+    gateway = fallback_gateway(chat, deep, retries=2)
+    assert [c.text for c in await chunks_of(gateway)] == ["Deep."]
+    assert len(chat.calls) == 3 and len(deep.calls) == 1
+    served = [r.served_by for r in fallbacks_in_context()]
+    assert served == ["chat", "chat", "chat_deep"]
+
+
+async def test_the_default_retry_count_applies() -> None:
+    chat = FakeLLM([SILENT] * (DEFAULT_SILENT_RETRIES + 1))
+    deep = FakeLLM([[LLMChunk(text="Deep.")]])
+    gateway = LLMGateway({"chat": chat, "chat_deep": deep}, fallbacks={"chat": "chat_deep"})
+    assert [c.text for c in await chunks_of(gateway)] == ["Deep."]
+    assert len(chat.calls) == DEFAULT_SILENT_RETRIES + 1
+
+
+async def test_a_timed_out_stream_goes_straight_to_the_fallback() -> None:
+    chat = FakeLLM([[Pause()]])
+    deep = FakeLLM([[LLMChunk(text="Deep.")]])
+    gateway = fallback_gateway(chat, deep, timeout=0.05, retries=3)
+    async with asyncio.timeout(1):
+        assert [c.text for c in await chunks_of(gateway)] == ["Deep."]
+    assert len(chat.calls) == 1
+
+
+async def test_the_fallback_is_bounded_by_the_first_roles_timeout() -> None:
+    # The fallback role has no timeout of its own; the first role's applies.
+    chat, deep = FakeLLM([SILENT]), FakeLLM([[Pause()]])
+    gateway = fallback_gateway(chat, deep, timeout=0.05, retries=0)
+    with pytest.raises(SilentStreamError, match="no output within 0.05s"):
+        async with asyncio.timeout(1):
+            await chunks_of(gateway)
+    assert deep.exits == ["cancelled"] and gateway.foreground_active == 0
+
+
+async def test_nothing_is_retried_after_output_began() -> None:
+    chat = FakeLLM([[LLMChunk(text="Half"), LLMChunk(finish_reason=FinishReason.LENGTH)]])
+    gateway = fallback_gateway(chat, FakeLLM([]), retries=3)
+    assert [c.text for c in await chunks_of(gateway)] == ["Half", None]
+    assert len(chat.calls) == 1 and fallbacks_in_context() == ()
+
+
+async def test_background_streams_are_not_retried() -> None:
+    chat = FakeLLM([SILENT])
+    gateway = fallback_gateway(chat, FakeLLM([]), retries=3)
+    assert await consume(gateway, "chat", Priority.BACKGROUND) == [""]
+    assert len(chat.calls) == 1
+
+
+def test_add_fallbacks_records_retries_on_their_step() -> None:
+    start = datetime(2026, 11, 15, 12, tzinfo=UTC)
+    step = StepTrace(
+        role="chat", messages=[], started_at=start, ended_at=start + timedelta(seconds=5)
+    )
+    trace = TurnTrace(
+        turn_id="t",
+        session_id="s",
+        started_at=start,
+        ended_at=step.ended_at,
+        steps=[step],
+        outcome="completed",
+    )
+    at = start + timedelta(seconds=1)
+    retry = StepFallback(role="chat", served_by="chat", reason="r", lost_seconds=0.6, at=at)
+    fallback = StepFallback(role="chat", served_by="chat_deep", reason="r", lost_seconds=1, at=at)
+    token = gateway_module._fallbacks.set((retry, fallback))
+    try:
+        [annotated] = add_fallbacks(trace).steps
+    finally:
+        gateway_module._fallbacks.reset(token)
+    assert annotated.retries == [retry] and annotated.fallback == fallback

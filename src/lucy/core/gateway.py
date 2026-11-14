@@ -31,14 +31,20 @@ abandoned generator is finalised.
 Silent streams (FOREGROUND only): a role may name a `fallback` role and a
 `first_output_timeout`. A FOREGROUND stream of such a role that ends, or goes
 `first_output_timeout` seconds, without producing any text or tool call is
-closed and the request is made once more on the fallback role, whose chunks
-are then yielded as if they were the first role's. The stream stays one
-FOREGROUND stream throughout, so BACKGROUND streams keep waiting. Nothing is
-retried once text or a tool call has been yielded, and the fallback attempt is
-not retried; if it produces nothing either, or if a role with a timeout and no
-fallback produces nothing, `SilentStreamError` is raised. Each fallback is
-logged and recorded for the turn's trace (`fallbacks_in_context`,
-`add_fallbacks`).
+closed. If it ended early (the adapter's hidden-loop guard, say) rather than
+timing out, the same request is first asked of the same role again, up to
+the role's `silent_retries` times (default `DEFAULT_SILENT_RETRIES`); the
+loop is random, so a second sample usually answers. Then the request is made
+once more on the fallback role, whose chunks are then yielded as if they were
+the first role's. The fallback attempt waits for its first output at most its
+own `first_output_timeout`, or else the first role's, so it cannot hang until
+the read timeout. The stream stays one FOREGROUND stream throughout, so
+BACKGROUND streams keep waiting. Nothing is retried once text or a tool call
+has been yielded, and the fallback attempt is not retried; if it produces
+nothing either, or if a role with a timeout and no fallback produces nothing,
+`SilentStreamError` is raised. Each retry and fallback is logged and recorded
+for the turn's trace (`fallbacks_in_context`, `add_fallbacks`; a retry is a
+`StepFallback` served by its own role).
 
 Model residency hooks (used by `lucy.core.residency`): listeners added with
 `on_request` are told the role and LLM of every adapter request as it is made,
@@ -81,6 +87,10 @@ logger = logging.getLogger(__name__)
 
 class GatewayError(LookupError):
     """An unknown role, or an adapter that is not an LLM."""
+
+
+DEFAULT_SILENT_RETRIES: Final = 3
+"""Same-role retries of a silent FOREGROUND stream that ended early, before its fallback."""
 
 
 class SilentStreamError(GatewayError):
@@ -181,7 +191,9 @@ _fallbacks: ContextVar[tuple[StepFallback, ...]] = ContextVar("lucy_llm_fallback
 
 
 def fallbacks_in_context() -> tuple[StepFallback, ...]:
-    """The fallbacks taken by FOREGROUND streams consumed in the current task so far.
+    """The retries and fallbacks taken by FOREGROUND streams consumed in the current task.
+
+    A retry is a record whose `served_by` is its own `role`.
 
     A stream is consumed in its consumer's task, so a turn's own fallbacks are
     visible to code running later in the same task (the orchestrator records a
@@ -191,20 +203,29 @@ def fallbacks_in_context() -> tuple[StepFallback, ...]:
 
 
 def add_fallbacks(trace: TurnTrace) -> TurnTrace:
-    """`trace` with each step's `fallback` filled in from `fallbacks_in_context`.
+    """`trace` with each step's `retries` and `fallback` filled in from `fallbacks_in_context`.
 
-    A fallback belongs to the step during which it started. Steps that already
-    have one are left alone.
+    A retry or fallback belongs to the step during which it started. Steps that
+    already have a fallback, or retries, keep them.
     """
     taken = list(fallbacks_in_context())
     if not taken:
         return trace
     steps = []
     for step in trace.steps:
-        match = next((f for f in taken if step.started_at <= f.at <= step.ended_at), None)
+        update: dict[str, Any] = {}
+        during = [f for f in taken if step.started_at <= f.at <= step.ended_at]
+        retries = [f for f in during if f.served_by == f.role]
+        if retries and not step.retries:
+            update["retries"] = retries
+            for record in retries:
+                taken.remove(record)
+        match = next((f for f in during if f.served_by != f.role), None)
         if match is not None and step.fallback is None:
             taken.remove(match)
-            step = step.model_copy(update={"fallback": match})
+            update["fallback"] = match
+        if update:
+            step = step.model_copy(update=update)
         steps.append(step)
     return trace.model_copy(update={"steps": steps})
 
@@ -214,6 +235,7 @@ class _Attempt:
     """The outcome of one guarded attempt: why it produced nothing, if it did not."""
 
     silent: str | None = None
+    timed_out: bool = False
 
 
 async def _guarded(
@@ -240,6 +262,7 @@ async def _guarded(
                 if not limit.expired():
                     raise
                 attempt.silent = f"no output within {timeout:g}s"
+                attempt.timed_out = True
                 return
             if item is _DONE:
                 attempt.silent = f"ended without output after {time.monotonic() - started:.1f}s"
@@ -308,14 +331,18 @@ class LLMGateway:
         fallbacks: Mapping[str, str] | None = None,
         first_output_timeouts: Mapping[str, float] | None = None,
         after_tool: Mapping[str, str] | None = None,
+        silent_retries: Mapping[str, int] | None = None,
     ) -> None:
         """`fallbacks` maps a role to the role that serves its silent FOREGROUND
         streams; `first_output_timeouts` gives a role's seconds to first output;
         `after_tool` maps a role to the role that serves its FOREGROUND streams
-        ending in a tool result (see the module docstring)."""
+        ending in a tool result; `silent_retries` gives a role's same-role
+        retries of a silent stream that ended early (default
+        `DEFAULT_SILENT_RETRIES`; see the module docstring)."""
         self._llms = dict(llms)
         self._fallbacks = dict(fallbacks or {})
         self._first_output_timeouts = dict(first_output_timeouts or {})
+        self._silent_retries = dict(silent_retries or {})
         self._after_tool = dict(after_tool or {})
         for kind, routes in (("fallback", self._fallbacks), ("after_tool", self._after_tool)):
             for role, other in routes.items():
@@ -336,7 +363,7 @@ class LLMGateway:
         """Create one adapter per distinct role config through `registry` (default: global).
 
         Roles with the same adapter and options share one adapter instance.
-        Each role's `fallback` and `first_output_timeout` are taken over.
+        Each role's `fallback`, `first_output_timeout` and `silent_retries` are taken over.
         """
         create = registry.create if registry is not None else _registry.create
         created: list[tuple[AdapterConfig, LLM]] = []
@@ -362,6 +389,9 @@ class LLMGateway:
                 if c.first_output_timeout is not None
             },
             after_tool={r: c.after_tool for r, c in roles.items() if c.after_tool is not None},
+            silent_retries={
+                r: c.silent_retries for r, c in roles.items() if c.silent_retries is not None
+            },
         )
 
     def for_role(self, role: str) -> LLM:
@@ -480,13 +510,37 @@ class LLMGateway:
                 return
 
             started = time.monotonic()
-            first = _Attempt()
-            iterator = self._open(role, llm, messages, tools, response_schema)
-            async with aclosing(_guarded(iterator, timeout, first)) as chunks:
-                async for chunk in chunks:
-                    yield chunk
-            if first.silent is None:
-                return
+            retries = self._silent_retries.get(role, DEFAULT_SILENT_RETRIES)
+            tries = 0
+            while True:
+                first = _Attempt()
+                iterator = self._open(role, llm, messages, tools, response_schema)
+                async with aclosing(_guarded(iterator, timeout, first)) as chunks:
+                    async for chunk in chunks:
+                        yield chunk
+                if first.silent is None:
+                    return
+                if first.timed_out or tries >= retries:
+                    break
+                tries += 1
+                lost = time.monotonic() - started
+                logger.warning(
+                    "the %r model produced no output (%s); asking it again (retry %d of %d, "
+                    "%.1fs lost)",
+                    role,
+                    first.silent,
+                    tries,
+                    retries,
+                    lost,
+                )
+                retry = StepFallback(
+                    role=role,
+                    served_by=role,
+                    reason=first.silent,
+                    lost_seconds=round(lost, 3),
+                    at=datetime.now(UTC),
+                )
+                _fallbacks.set((*_fallbacks.get(), retry))
             if fallback is None:
                 raise SilentStreamError(f"the {role!r} model produced no output ({first.silent})")
             lost = time.monotonic() - started
@@ -507,7 +561,7 @@ class LLMGateway:
             _fallbacks.set((*_fallbacks.get(), record))
             second = _Attempt()
             iterator = self._open(fallback, self._llms[fallback], messages, tools, response_schema)
-            timeout = self._first_output_timeouts.get(fallback)
+            timeout = self._first_output_timeouts.get(fallback, timeout)
             async with aclosing(_guarded(iterator, timeout, second)) as chunks:
                 async for chunk in chunks:
                     yield chunk

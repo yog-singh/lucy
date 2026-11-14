@@ -21,11 +21,15 @@
 # block repeats 4 times (about 0.6 s; normal replies have at most 2). Cost:
 # logprobs switch off Ollama's speculative decoding, so replies generate about
 # a third slower (33 instead of 49 tokens/s); remove the option to trade that
-# for slower recovery. A reply that produces nothing is then asked once more of
-# `fallback`, the same model with thinking on (never seen to loop), and the
-# retry is logged and shown in the turn's trace. `first_output_timeout` gives
-# up on a reply that shows nothing for that many seconds (a long uncached
-# prompt can take about 35 s before its first token). `max_tokens` is a
+# for slower recovery. A reply ended that way is first asked again of the same
+# role, up to `silent_retries` times (default 3; each costs about 0.6 s, and a
+# retry answered 3 of 18 replayed looping requests), then once of `fallback`,
+# the same model with thinking on (never seen to loop, but it thinks for 12 to
+# 24 s first). Retries and fallbacks are logged and shown in the turn's trace.
+# `first_output_timeout` gives up on a reply that shows nothing for that many
+# seconds (a long uncached prompt can take about 35 s before its first token);
+# a fallback without its own timeout gets this one. If nothing answers, Lucy
+# says she lost her train of thought. `max_tokens` is a
 # backstop: the longest replies measured were about 300 tokens, and a loop
 # that is not detected ends at the cap (about 30 s) instead of the 120 s read
 # timeout. Adding `after_tool = "chat_deep"` to the chat role would answer every

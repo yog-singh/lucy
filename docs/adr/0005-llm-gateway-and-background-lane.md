@@ -19,6 +19,8 @@ Amended 2026-11-12, as implemented:
 
 Amended 2026-11-13: a foreground stream first passes a gate held by the residency policy (ADR 0017). If a warm-up is in flight, the gate cancels a first pre-fill and waits for any other step, for at most 15 s. Warm-up requests themselves are outside both lanes.
 
+Amended 2026-11-15: silent foreground streams. A stream that ends early with no output (the adapter's hidden-loop guard) is first asked of the same role again, up to the role's `silent_retries` times (default 3), before its `fallback`; a stream that timed out goes straight to the fallback. The fallback waits for its first output at most its own `first_output_timeout`, or else the first role's, so it can no longer hang until the read timeout. Retries go to the same role and model, so they cause no unload or reload (ADR 0017), and each is recorded in the turn trace (`StepTrace.retries`). If everything stays silent, the orchestrator says "Sorry, I lost my train of thought. Could you say that again?" and ends the turn as an error. Measured on replayed looping requests: a same-role retry answered 3 of 18 samples (about 0.6 s each), and `chat_deep` answered 6 of 6 after 12 to 24 s of hidden reasoning, without looping.
+
 ## Consequences
 
 - Conversation latency is protected.

@@ -121,7 +121,7 @@ async def test_a_fallback_is_recorded_in_the_turn_trace(tmp_path: Path) -> None:
     # One fake serves both roles: the chat attempt is silent, the fallback answers.
     llm = FakeLLM([[LLMChunk(finish_reason=FinishReason.LENGTH)], reply("Recovered.")])
     roles = {
-        "chat": {"adapter": "fake", "model": "m", "fallback": "chat_deep"},
+        "chat": {"adapter": "fake", "model": "m", "fallback": "chat_deep", "silent_retries": 0},
         "chat_deep": {"adapter": "fake", "model": "m", "extra": {"reasoning_effort": "low"}},
     }
     settings = Settings(
@@ -198,3 +198,24 @@ async def test_memory_defaults_to_sqlite_in_data_dir(
     async with LucyApp(settings, registry=make_registry(FakeLLM([]))) as app:
         assert isinstance(app.memory, SQLiteMemoryStore)
         assert app.memory.path == Path("data/lucy.db")
+
+
+async def test_a_turn_that_stays_silent_says_so_plainly(tmp_path: Path) -> None:
+    db = tmp_path / "lucy.db"
+    silent = [LLMChunk(finish_reason=FinishReason.LENGTH)]
+    llm = FakeLLM([silent, silent, silent])  # chat, one retry, chat_deep
+    roles = {
+        "chat": {"adapter": "fake", "model": "m", "fallback": "chat_deep", "silent_retries": 1},
+        "chat_deep": {"adapter": "fake", "model": "m", "extra": {"reasoning_effort": "low"}},
+    }
+    settings = Settings(
+        llm=LLMSettings.model_validate({"roles": roles}),
+        memory=AdapterConfig(adapter="sqlite", options={"path": str(db)}),
+    )
+    async with LucyApp(settings, registry=make_registry(llm)) as app:
+        events = await run_turn(app, "Hello?")
+    assert text_of(events) == "Sorry, I lost my train of thought. Could you say that again?"
+    assert events[-1].reason == "error" and "neither did" in (events[-1].error or "")
+    async with SQLiteMemoryStore(db) as store:
+        trace = await store.get_trace(events[-1].turn_id or "")
+    assert trace is not None and [r.served_by for r in trace.steps[0].retries] == ["chat"]

@@ -39,7 +39,7 @@ from lucy.core.events import (
     TurnEnded,
     UserMessage,
 )
-from lucy.core.gateway import LLMGateway, Priority
+from lucy.core.gateway import LLMGateway, Priority, SilentStreamError
 from lucy.core.history import events_to_messages, tool_message
 from lucy.core.ports import ConfirmableTool, MemoryStore, Tool, TraceSink, tool_spec
 from lucy.core.reminders import TimerHandler
@@ -78,6 +78,10 @@ NOT_MADE: Final = "The change I asked about was not made; ask again if you still
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+SILENT_REPLY: Final = "Sorry, I lost my train of thought. Could you say that again?"
+"""Said when the model produced nothing even after its retries and fallback."""
 
 
 def _describe(exc: BaseException) -> str:
@@ -316,6 +320,8 @@ class Orchestrator:
             logger.exception("turn %s failed", turn.turn_id)
             outcome, error = "error", _describe(exc)
             self._close_step(turn)
+            if isinstance(exc, SilentStreamError):
+                await self._say_safely(turn, SILENT_REPLY)
             await self._end_safely(turn, "error", error)
         finally:
             await self._record_trace(turn, outcome, error)
@@ -542,6 +548,12 @@ class Orchestrator:
             await self._emit(TurnEnded(**self._ids(turn), reason="interrupted"))
         except Exception:
             logger.exception("could not record the interruption of turn %s", turn.turn_id)
+
+    async def _say_safely(self, turn: _Turn, text: str) -> None:
+        try:
+            await self._say(turn, text)
+        except Exception:
+            logger.exception("could not say the failure of turn %s", turn.turn_id)
 
     async def _end_safely(self, turn: _Turn, reason: Outcome, error: str | None) -> None:
         try:
