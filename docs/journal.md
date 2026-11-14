@@ -2,6 +2,10 @@
 
 Dated notes on what was built, what failed and what changed. Newest first.
 
+## 2026-11-15: silent turns
+
+- A chat reply caught in the hidden loop is now retried on the same role up to 3 times (0.6 s each) before `chat_deep`, whose wait for first output is now bounded (60 s), and a turn that stays silent says "Sorry, I lost my train of thought. Could you say that again?" instead of hanging for about 100 s (ADR 0005). Not yet committed.
+
 ## 2026-11-14: reminders are delivered
 
 - Reminders now fire (ADR 0020): `ReminderService` claims due ones for a client, the orchestrator says them in a proactive turn with no model call, and `lucy chat` prints them above the prompt; voice delivery comes next. Built by a sub-agent; not yet committed.

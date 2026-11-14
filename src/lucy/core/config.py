@@ -55,16 +55,19 @@ class LLMRoleConfig(AdapterConfig):
     role's stream ends, or produces nothing for `first_output_timeout` seconds,
     without any text or tool call. `after_tool` names a role that serves this
     role's FOREGROUND streams whose last message is a tool result (the answer
-    step after a lookup). See `LLMGateway.stream`. None of these keys is passed
-    to the adapter.
+    step after a lookup). `silent_retries` is how many times such a stream that
+    ends early without output is asked of the same role again before the
+    fallback (None: the gateway's default, `DEFAULT_SILENT_RETRIES`). See
+    `LLMGateway.stream`. None of these keys is passed to the adapter.
     """
 
     fallback: str | None = Field(default=None, min_length=1)
     first_output_timeout: float | None = Field(default=None, gt=0)
     after_tool: str | None = Field(default=None, min_length=1)
+    silent_retries: int | None = Field(default=None, ge=0)
 
     own_keys: ClassVar[frozenset[str]] = frozenset(
-        {"adapter", "fallback", "first_output_timeout", "after_tool"}
+        {"adapter", "fallback", "first_output_timeout", "after_tool", "silent_retries"}
     )
 
 
