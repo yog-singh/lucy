@@ -195,6 +195,8 @@ async def tools(
                 f"  configured: yes, risk {risk.value}, offered as "
                 f"{_exposed_name(name, tool.name, conf)}; state: {item.state}",
             )
+            if fixed := conf.tools[tool.name].fixed:
+                _write(out, f"  fixed (hidden from the model): {', '.join(sorted(fixed))}")
             if item.state == "changed":
                 _changed(out, item)
         for item in result.tools:

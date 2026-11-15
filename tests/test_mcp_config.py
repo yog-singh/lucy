@@ -109,6 +109,27 @@ def test_preview_refuses_other_placeholders(preview: str, message: str) -> None:
     refused(McpToolSettings, {"preview": preview}, message)
 
 
+def test_fixed_accepts_plain_values() -> None:
+    fixed = {"user_google_email": "a@example.com", "limit": 5, "ratio": 0.5, "all": True}
+    tool = McpToolSettings.model_validate({"fixed": fixed})
+    assert tool.fixed == fixed and isinstance(tool.fixed["all"], bool)
+    assert McpToolSettings().fixed == {}
+
+
+@pytest.mark.parametrize(
+    ("fixed", "message"),
+    [
+        ({"": "x"}, "fixed argument names must not be empty"),
+        ({" ": "x"}, "fixed argument names must not be empty"),
+        ({"to": ["a", "b"]}, "fixed.to"),
+        ({"to": {"a": 1}}, "fixed.to"),
+        ({"to": None}, "fixed.to"),
+    ],
+)
+def test_fixed_refuses_bad_config(fixed: dict[str, Any], message: str) -> None:
+    refused(McpToolSettings, {"fixed": fixed}, message)
+
+
 # --- Server transport ---------------------------------------------------------
 
 

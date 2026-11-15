@@ -13,7 +13,18 @@ from pathlib import Path, PurePath
 from typing import Any, ClassVar, Final, Literal, NamedTuple, Self
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictFloat,
+    StrictInt,
+    StrictStr,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from lucy.core.context import ContextLayout
 from lucy.core.types import Risk
@@ -491,6 +502,20 @@ class McpToolSettings(BaseModel):
     filled from the call's arguments, e.g. "Send an email to {to} about {subject}?"."""
     guidance: str | None = Field(default=None, min_length=1, max_length=300)
     """One sentence added to the tool guidance in the system prompt."""
+    fixed: dict[str, StrictBool | StrictInt | StrictFloat | StrictStr] = Field(default_factory=dict)
+    """Argument values pinned by the user: hidden from the model's schema and always
+    sent with these values, whatever the model passes (e.g. the account address a
+    mail server signs in as). A key the server's schema lacks skips the tool."""
+
+    @field_validator("fixed")
+    @classmethod
+    def _named_fixed(
+        cls, fixed: dict[str, bool | int | float | str]
+    ) -> dict[str, bool | int | float | str]:
+        for key in fixed:
+            if not key.strip():
+                raise ValueError("fixed argument names must not be empty")
+        return fixed
 
     @field_validator("alias")
     @classmethod

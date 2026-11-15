@@ -446,6 +446,72 @@ async def test_preview_is_deterministic_and_order_free() -> None:
 # --- Builder ---------------------------------------------------------------------
 
 
+# --- Fixed arguments -------------------------------------------------------------
+
+FIXED = {"user_google_email": "me@example.com"}
+MAIL_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"query": {"type": "string"}, "user_google_email": {"type": "string"}},
+    "required": ["query", "user_google_email"],
+}
+
+
+def test_fixed_argument_hidden_from_schema_and_required() -> None:
+    tool = make(remote_tool=remote(schema=MAIL_SCHEMA), fixed=FIXED)
+    assert tool.parameters["properties"] == {"query": {"type": "string"}}
+    assert tool.parameters["required"] == ["query"]
+    only_fixed = {**MAIL_SCHEMA, "required": ["user_google_email"]}
+    assert "required" not in make(remote_tool=remote(schema=only_fixed), fixed=FIXED).parameters
+
+
+async def test_fixed_value_sent_and_wins_over_the_model() -> None:
+    caller = FakeCaller()
+    tool = make(caller, remote_tool=remote(schema=MAIL_SCHEMA), fixed=FIXED, risk="read")
+    assert not (await tool.run({"query": "invoices"})).is_error
+    hijack = await tool.run({"query": "x", "user_google_email": "other@example.com"})
+    assert not hijack.is_error
+    assert [args for _tool, args, _timeout in caller.calls] == [
+        {"query": "invoices", **FIXED},
+        {"query": "x", **FIXED},
+    ]
+
+
+async def test_preview_shows_model_arguments_and_template_may_name_fixed() -> None:
+    generic = make(remote_tool=remote(schema=MAIL_SCHEMA), fixed=FIXED)
+    question = (await generic.preview({"query": "q", "user_google_email": "x@y"})).content
+    assert "me@example.com" not in question and "x@y" not in question and "query" in question
+    templated = make(
+        remote_tool=remote(schema=MAIL_SCHEMA),
+        fixed=FIXED,
+        preview="Search {user_google_email} for {query}?",
+    )
+    out = await templated.preview({"query": "q"})
+    assert out.content == "Search me@example.com for q?"
+
+
+def test_unknown_fixed_key_skips_the_tool() -> None:
+    settings = McpServerSettings.model_validate(
+        {
+            "url": "https://mail.example",
+            "tools": {"send_draft": {"fixed": {"user_gogle_email": "me@example.com"}}},
+        }
+    )
+    tools, skipped = build_mcp_tools("gmail", settings, [remote()], FakeCaller())
+    assert tools == []
+    assert [(s.tool, s.reason) for s in skipped] == [
+        ("send_draft", "fixed argument 'user_gogle_email' is not an argument of this tool")
+    ]
+
+
+def test_fixed_settings_leave_the_lock_hash_alone() -> None:
+    from lucy.adapters.mcp.lock import tool_hash
+
+    rt = remote(schema=MAIL_SCHEMA)
+    before = tool_hash(rt)
+    make(remote_tool=rt, fixed=FIXED)
+    assert tool_hash(rt) == before and rt.input_schema == MAIL_SCHEMA
+
+
 def test_builder_skips_with_reasons() -> None:
     settings = McpServerSettings.model_validate(
         {

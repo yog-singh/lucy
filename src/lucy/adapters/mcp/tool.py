@@ -428,7 +428,9 @@ class McpTool:
         self.sends_out = True
         self.private_source: str | None = server if server_settings.private else None
         self.destination = f"the {server} service"
-        self.parameters = sanitise_schema(remote.input_schema)  # SchemaRefused propagates
+        self.parameters = _without_fixed(
+            sanitise_schema(remote.input_schema), settings.fixed
+        )  # SchemaRefused propagates
         self._server_settings = server_settings
         self._settings = settings
         self._caller = caller
@@ -444,6 +446,12 @@ class McpTool:
             f"{self._action} (a tool of the {self.server} service).", DESCRIPTION_CHARS
         )
 
+    def _model_args(self, args: Any) -> Any:
+        """`args` without any key the user fixed: the model cannot choose those."""
+        if not isinstance(args, dict) or not self._settings.fixed:
+            return args
+        return {key: value for key, value in args.items() if key not in self._settings.fixed}
+
     def _invalid(self, args: Any) -> ToolOutput | None:
         problems = _argument_problems(self.parameters, args)
         if not problems:
@@ -454,10 +462,11 @@ class McpTool:
         )
 
     async def run(self, args: dict[str, Any]) -> ToolOutput:
+        args = self._model_args(args)
         if (invalid := self._invalid(args)) is not None:
             return invalid
         try:
-            result = await self._call(args)
+            result = await self._call({**args, **self._settings.fixed})
         except McpError as exc:
             return ToolOutput(content=self._error_text(exc), is_error=True)
         body = _body(result)
@@ -498,11 +507,14 @@ class McpTool:
         return f"The {self.server} service gave an answer Lucy couldn't understand."
 
     async def preview(self, args: dict[str, Any]) -> ToolOutput:
-        """The confirmation question: deterministic from `args`, no side effects."""
+        """The confirmation question: deterministic from `args`, no side effects. It
+        names the model's arguments; fixed values appear only where the user's own
+        template asks for them."""
+        args = self._model_args(args)
         if (invalid := self._invalid(args)) is not None:
             return invalid
         if self._settings.preview is not None:
-            return self._templated(self._settings.preview, args)
+            return self._templated(self._settings.preview, {**args, **self._settings.fixed})
         return ToolOutput(content=self._generic(args))
 
     def _templated(self, template: str, args: dict[str, Any]) -> ToolOutput:
@@ -561,6 +573,30 @@ def _spoken_value(value: Any, limit: int, *, quoted: bool = True) -> str:
     text = _one_line(text).replace('"', "'").replace("“", "'").replace("”", "'").replace("?", "")
     text = _cap_words(_one_line(_NO_CLAUSE.sub("…", text)), limit)
     return f'"{text}"' if quoted else text
+
+
+# --- Fixed arguments -----------------------------------------------------------
+
+
+def _without_fixed(schema: dict[str, Any], fixed: Mapping[str, Any]) -> dict[str, Any]:
+    """`schema` with the user's fixed arguments removed from `properties` and
+    `required`. Raises `SchemaRefused` naming any fixed key the schema lacks, so a
+    typo in the config skips the tool instead of being sent silently."""
+    if not fixed:
+        return schema
+    properties: dict[str, Any] = schema.get("properties", {})
+    unknown = sorted(key for key in fixed if key not in properties)
+    if unknown:
+        raise SchemaRefused(
+            f"fixed argument {', '.join(map(repr, unknown))} is not an argument of this tool"
+        )
+    out = {**schema, "properties": {k: v for k, v in properties.items() if k not in fixed}}
+    required = [r for r in schema.get("required", []) if r not in fixed]
+    if required:
+        out["required"] = required
+    else:
+        out.pop("required", None)
+    return out
 
 
 # --- Builder -------------------------------------------------------------------
