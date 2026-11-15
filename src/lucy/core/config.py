@@ -6,13 +6,17 @@ are configured per role; `chat` is required.
 
 from __future__ import annotations
 
+import re
+import string
 import tomllib
-from pathlib import Path
-from typing import Any, ClassVar, Final, Literal, Self
+from pathlib import Path, PurePath
+from typing import Any, ClassVar, Final, Literal, NamedTuple, Self
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from lucy.core.context import ContextLayout
+from lucy.core.types import Risk
 
 
 class ConfigError(ValueError):
@@ -349,6 +353,306 @@ class ToolsSettings(BaseModel):
         return self
 
 
+MCP_NAME_MAX: Final = 64
+"""Longest tool name offered to the model (the common limit of chat model APIs)."""
+
+_PLAIN_NAME: Final = re.compile(r"^[a-z0-9_]+$")
+_ENV_NAME: Final = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_LOOPBACK_HOSTS: Final = frozenset({"localhost", "127.0.0.1", "::1"})
+
+# Launchers that fetch and run a package by name (ADR 0022). The value is the
+# subcommand that must follow the command, if any.
+_NPM_LAUNCHERS: Final = {"npx": None, "bunx": None, "pnpm": "dlx", "yarn": "dlx"}
+_PY_LAUNCHERS: Final = {"uvx": None, "pipx": "run", "uv": "tool run"}
+_PACKAGE_OPTIONS: Final = {
+    "npm": frozenset({"-p", "--package"}),
+    "python": frozenset({"--from", "--spec"}),
+}
+"""Launcher options whose value is the package to run (then the first positional
+argument is the command inside it)."""
+_EXTRA_PACKAGE_OPTIONS: Final = {"npm": frozenset[str](), "python": frozenset({"--with"})}
+"""Launcher options whose value is a further package installed alongside."""
+_SEMVER: Final = r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?"
+_NPM_PINNED: Final = re.compile(rf"^(?:@[a-z0-9][\w.-]*/)?[a-z0-9][\w.-]*@{_SEMVER}$", re.I)
+_PEP440: Final = r"\d+(?:\.\d+)*(?:(?:a|b|rc)\d+)?(?:\.post\d+)?(?:\.dev\d+)?"
+_PY_PINNED: Final = re.compile(rf"^[a-z0-9][\w.-]*(?:\[[\w,.-]+\])?(?:==|@){_PEP440}$", re.I)
+
+
+def mcp_tool_name(server: str, tool: str) -> str:
+    """The name an MCP tool is offered to the model under, unless aliased with `as`:
+    `<server>_<tool>`, lower-cased, each run of characters outside `[a-z0-9_]`
+    replaced by one `_`, repeated `_` collapsed and leading/trailing `_` removed.
+    The one place this rule lives (ADR 0022); may return "" for an unusable name."""
+    name = re.sub(r"[^a-z0-9_]+", "_", f"{server}_{tool}".lower())
+    return re.sub(r"_+", "_", name).strip("_")
+
+
+def _check_preview_template(template: str) -> None:
+    """A preview may contain only `{argument_name}` placeholders (and `{{`/`}}`)."""
+    try:
+        parts = list(string.Formatter().parse(template))
+    except ValueError as exc:
+        raise ValueError(f"preview {template!r} is not a valid template: {exc}") from None
+    for _literal, field, spec, conversion in parts:
+        if field is None:
+            continue
+        if not field.isidentifier():
+            raise ValueError(
+                f"preview {template!r} has placeholder {{{field}}}; placeholders must be "
+                "argument names such as {to} (no positions, attributes or indexes)"
+            )
+        if spec or conversion:
+            raise ValueError(
+                f"preview {template!r} formats placeholder {{{field}}}; "
+                "use plain {name} placeholders without ! or :"
+            )
+
+
+def _is_latest(arg: str) -> bool:
+    lowered = arg.lower()
+    return lowered == "latest" or lowered.endswith(("@latest", "==latest", ":latest"))
+
+
+def _launcher_kind(command: str, args: list[str]) -> tuple[str, list[str]] | None:
+    """("npm" | "python", the arguments after the launcher) for a package launcher."""
+    base = PurePath(command).name
+    for kind, launchers in (("npm", _NPM_LAUNCHERS), ("python", _PY_LAUNCHERS)):
+        if base not in launchers:
+            continue
+        sub = launchers[base]
+        if sub is None:
+            return kind, args
+        words = sub.split()
+        if args[: len(words)] == words:
+            return kind, args[len(words) :]
+        return None  # e.g. `uv run` or `pnpm install`: not a package launch
+    return None
+
+
+def _check_pinned(command: str, args: list[str]) -> None:
+    """Refuse launches that do not pin an exact version (rule in ADR 0022)."""
+    latest = [arg for arg in [command, *args] if _is_latest(arg)]
+    if latest:
+        raise ValueError(f"launch argument {latest[0]!r} is not a pinned version")
+    found = _launcher_kind(command, args)
+    if found is None:
+        return
+    kind, rest = found
+    pinned, example = (_NPM_PINNED, "name@1.2.3") if kind == "npm" else (_PY_PINNED, "name==1.2.3")
+    specs: list[str] = []
+    package: str | None = None
+    first_positional: str | None = None
+    position = 0
+    while position < len(rest):
+        arg = rest[position]
+        option, _, inline = arg.partition("=")
+        if option in _PACKAGE_OPTIONS[kind] or option in _EXTRA_PACKAGE_OPTIONS[kind]:
+            value = inline if inline else (rest[position + 1] if position + 1 < len(rest) else "")
+            position += 1 if inline else 2
+            specs.extend(value.split(","))
+            if option in _PACKAGE_OPTIONS[kind]:
+                package = value
+            continue
+        if not arg.startswith("-"):
+            first_positional = arg
+            break
+        position += 1
+    if package is None:
+        if first_positional is None:
+            raise ValueError(f"{command!r} is given no package to run")
+        specs.append(first_positional)
+    for spec in specs:
+        if not pinned.match(spec):
+            raise ValueError(
+                f"{PurePath(command).name} package {spec!r} must pin an exact version "
+                f"(e.g. {example!r}); options before the package must be written "
+                "--option=value"
+            )
+
+
+class McpToolSettings(BaseModel):
+    """One tool of an MCP server that Lucy may offer to the chat model (ADR 0022).
+
+    Only listed tools are offered. Everything the server says about a tool is
+    untrusted; the user's settings here are what Lucy applies.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", populate_by_name=True)
+
+    risk: Risk = Risk.DANGEROUS
+    """Risk tier (ADR 0006); unset is dangerous: Lucy asks before every call."""
+    alias: str | None = Field(default=None, alias="as")
+    """Name offered to the model instead of `<server>_<tool>` (`as` in TOML)."""
+    description: str | None = Field(default=None, min_length=1, max_length=200)
+    """Replaces the server's description (otherwise its first sentence, at most 200
+    characters)."""
+    preview: str | None = Field(default=None, min_length=1, max_length=300)
+    """The confirmation question for a dangerous tool, with `{argument}` placeholders
+    filled from the call's arguments, e.g. "Send an email to {to} about {subject}?"."""
+    guidance: str | None = Field(default=None, min_length=1, max_length=300)
+    """One sentence added to the tool guidance in the system prompt."""
+
+    @field_validator("alias")
+    @classmethod
+    def _plain_alias(cls, alias: str | None) -> str | None:
+        if alias is not None and not (_PLAIN_NAME.match(alias) and len(alias) <= MCP_NAME_MAX):
+            raise ValueError(
+                f"tool alias {alias!r} must be 1 to {MCP_NAME_MAX} characters of a-z, 0-9 and _"
+            )
+        return alias
+
+    @field_validator("preview")
+    @classmethod
+    def _valid_preview(cls, preview: str | None) -> str | None:
+        if preview is not None:
+            _check_preview_template(preview)
+        return preview
+
+
+class McpServerSettings(BaseModel):
+    """One MCP server: a local program Lucy starts (`command`) or a remote address
+    (`url`), and the tools of it Lucy may offer (ADR 0022)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    command: str | None = Field(default=None, min_length=1)
+    """Local (stdio) server: the program to start. Package launchers (npx, uvx, ...)
+    must pin an exact version."""
+    args: list[str] = Field(default_factory=list)
+    """Arguments for `command`."""
+    env: dict[str, str] = Field(default_factory=dict)
+    """Environment variables for `command` (not secrets: those go in `env_keychain`).
+    The program gets only these, `env_from` and `env_keychain`, plus a minimal base."""
+    url: str | None = Field(default=None, pattern=r"^https?://[^\s/]+")
+    """Remote server (Streamable HTTP): its address; https unless on this machine."""
+    timeout: float = Field(default=30.0, gt=0, le=600)
+    """Seconds one tool call may take."""
+    max_result_chars: int = Field(default=6000, ge=200)
+    """Longest result handed to the model, in characters."""
+    private: bool = False
+    """The server returns private data (mail, files): later calls in the same turn that
+    could send data elsewhere ask the user first."""
+    token_keychain: str | None = Field(default=None, min_length=1)
+    """Remote only: the macOS Keychain item (service name) holding the bearer token."""
+    env_keychain: dict[str, str] = Field(default_factory=dict)
+    """Local only: environment variable name -> Keychain item (service name) whose
+    secret it is set to."""
+    env_from: list[str] = Field(default_factory=list)
+    """Local only: names of Lucy's own environment variables passed on unchanged."""
+    tools: dict[str, McpToolSettings] = Field(default_factory=dict)
+    """The server's tools Lucy may offer, by the server's tool name."""
+
+    @model_validator(mode="after")
+    def _check_transport(self) -> Self:
+        if (self.command is None) == (self.url is None):
+            raise ValueError("set exactly one of command (a local server) or url (a remote one)")
+        if self.url is not None:
+            local_only = [
+                key for key in ("args", "env", "env_keychain", "env_from") if getattr(self, key)
+            ]
+            if local_only:
+                raise ValueError(
+                    f"{', '.join(local_only)} apply only to a local server (command), not url"
+                )
+            parts = urlsplit(self.url)
+            if parts.scheme == "http" and parts.hostname not in _LOOPBACK_HOSTS:
+                raise ValueError(f"url {self.url!r} must use https (http only on this machine)")
+            return self
+        if self.token_keychain is not None:
+            raise ValueError("token_keychain applies only to a remote server (url)")
+        names = [*self.env, *self.env_keychain, *self.env_from]
+        bad = [name for name in names if not _ENV_NAME.match(name)]
+        if bad:
+            raise ValueError(f"{bad[0]!r} is not an environment variable name")
+        twice = sorted({name for name in names if names.count(name) > 1})
+        if twice:
+            raise ValueError(
+                f"environment variable {twice[0]!r} is set more than once "
+                "(env, env_keychain, env_from)"
+            )
+        assert self.command is not None
+        _check_pinned(self.command, self.args)
+        return self
+
+
+class McpExposedTool(NamedTuple):
+    """An MCP tool as offered to the model: its name there, server and server-side name."""
+
+    name: str
+    server: str
+    tool: str
+
+
+class McpSettings(BaseModel):
+    """MCP servers whose tools Lucy may use (ADR 0022). Nothing runs unless listed in
+    `enabled`, and only tools approved with `lucy mcp approve NAME` are offered."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    enabled: list[str] = Field(default_factory=list)
+    """Names of the servers (tables under `[mcp.servers]`) in use."""
+    max_tools: int = Field(default=8, ge=1, le=64)
+    """Most MCP tools offered to the model, over all enabled servers."""
+    path: str = "data/mcp"
+    """Directory for the approval file (`lock.json`) and each server's working
+    directory (`<path>/<server>/`)."""
+    servers: dict[str, McpServerSettings] = Field(default_factory=dict)
+
+    def exposed_tools(self) -> list[McpExposedTool]:
+        """The tools of the enabled servers, in `enabled` then listing order."""
+        return [
+            McpExposedTool(settings.alias or mcp_tool_name(server, tool), server, tool)
+            for server in self.enabled
+            if server in self.servers
+            for tool, settings in self.servers[server].tools.items()
+        ]
+
+    def exposed_tool_names(self) -> list[str]:
+        """The names the enabled servers' tools are offered to the model under."""
+        return [exposed.name for exposed in self.exposed_tools()]
+
+    @model_validator(mode="after")
+    def _check(self) -> Self:
+        bad = [name for name in self.servers if not _PLAIN_NAME.match(name)]
+        if bad:
+            raise ValueError(f"MCP server name {bad[0]!r} must use only a-z, 0-9 and _")
+        unknown = [name for name in self.enabled if name not in self.servers]
+        if unknown:
+            raise ValueError(
+                f"[mcp] enabled lists {', '.join(map(repr, unknown))}, which has no "
+                f"[mcp.servers.NAME] table; configured: {', '.join(self.servers) or 'none'}"
+            )
+        twice = sorted({name for name in self.enabled if self.enabled.count(name) > 1})
+        if twice:
+            raise ValueError(f"[mcp] enabled lists {', '.join(map(repr, twice))} twice")
+        builtin = set(ToolsSettings.known_tools())
+        owner: dict[str, str] = {}
+        for exposed in self.exposed_tools():
+            where = f"{exposed.server}.{exposed.tool}"
+            if not exposed.name or len(exposed.name) > MCP_NAME_MAX:
+                raise ValueError(
+                    f"MCP tool {where} gives the name {exposed.name!r}; give it a name "
+                    f"with as = ... (1 to {MCP_NAME_MAX} characters of a-z, 0-9 and _)"
+                )
+            if exposed.name in builtin:
+                raise ValueError(
+                    f"MCP tool {where} would be named {exposed.name!r}, a built-in tool; "
+                    "rename it with as = ..."
+                )
+            if exposed.name in owner:
+                raise ValueError(
+                    f"MCP tools {owner[exposed.name]} and {where} would both be named "
+                    f"{exposed.name!r}; rename one with as = ..."
+                )
+            owner[exposed.name] = where
+        if len(owner) > self.max_tools:
+            raise ValueError(
+                f"the enabled MCP servers list {len(owner)} tools, more than max_tools "
+                f"({self.max_tools}); list fewer or raise max_tools"
+            )
+        return self
+
+
 class VoiceSettings(BaseModel):
     """`lucy voice`: listening, endpointing and audio devices (see docs/voice.md).
 
@@ -484,6 +788,7 @@ class Settings(BaseModel):
     learning: LearningSettings = Field(default_factory=LearningSettings)
     retrieval: RetrievalSettings = Field(default_factory=RetrievalSettings)
     tools: ToolsSettings = Field(default_factory=ToolsSettings)
+    mcp: McpSettings = Field(default_factory=McpSettings)
     voice: VoiceSettings = Field(default_factory=VoiceSettings)
     wake: WakeSettings = Field(default_factory=WakeSettings)
     context: ContextSettings = Field(default_factory=ContextSettings)

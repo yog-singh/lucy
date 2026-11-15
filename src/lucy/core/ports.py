@@ -212,6 +212,30 @@ class ConfirmableTool(Tool, Protocol):
 
 
 @runtime_checkable
+class ToolProvider(Protocol):
+    """A source of tools other than the built-in catalogue, such as an MCP server
+    (ADR 0022). The app offers its tools alongside the built-in ones.
+
+    - `tools()` is cheap, has no side effects and may be called right after
+      construction, before `start`: the tools it returns are fixed at
+      construction (from the settings), so the prompt and the confirmation
+      checks see them up front. Each obeys the `Tool` contract, including
+      `ConfirmableTool` for `Risk.DANGEROUS`.
+    - `start()` is idempotent. It may do little and defer the real work (such as
+      starting a server process) to a tool's first call.
+    - `aclose()` is idempotent, safe after a failed or missing `start`, and leaves
+      nothing running.
+    - Nothing may block the event loop: blocking work goes to a thread.
+    """
+
+    async def start(self) -> None: ...
+
+    def tools(self) -> list[Tool]: ...
+
+    async def aclose(self) -> None: ...
+
+
+@runtime_checkable
 class TraceSink(Protocol):
     """Stores one trace per turn, so "why did she say that?" can be answered (ADR 0004)."""
 

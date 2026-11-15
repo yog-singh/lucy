@@ -16,6 +16,7 @@ Not built yet:
 
 - Voice stages 2 and 3: interrupting Lucy by speaking (barge-in, with echo cancellation) and a wake word.
 - Tools that act on the home; the lookup tools, the calendar tools below and the confirmation flow for dangerous tools are built.
+- MCP servers over HTTP are untested end to end, OAuth is not supported, and the private-data guard (asking before data from a `private` server is sent elsewhere) is not enforced yet (ADR 0022).
 - Telling Lucy in conversation to forget or correct something (use `lucy memory forget` and `lucy memory correct`).
 - Lucy asking the user to confirm an inference before acting on it.
 
@@ -164,6 +165,19 @@ Four calendar tools use the calendars in the Mac's Calendar app, through macOS's
 Dates are worked out in code, not by the model: the tools accept ISO dates and times and a small set of the user's own words ("today", "tomorrow", weekdays, "this week", "next week", "20 November", with a time such as "3pm" or a part of the day), refuse ambiguous ones such as "next friday" with the dates it could mean, and every result states the dates with their weekdays. Enable them with `enabled = [..., "calendar", "add_calendar_event", "edit_calendar_event", "delete_calendar_event"]` (any subset); `[tools.calendar]` chooses which calendars are read and where new events go. Nothing leaves the machine. The first call makes macOS ask once whether the app Lucy runs in may use your calendars; if access was refused, allow it in System Settings > Privacy & Security > Calendars. See [ADR 0019](docs/adr/0019-calendar-tools.md).
 
 Four reminder tools keep reminders and timers in the SQLite memory database (so they survive a restart and are shared by `lucy chat` and `lucy listen`): `reminders` (read) lists pending ones with ids such as `r12`; `set_reminder`, `set_timer` and `cancel_reminder` (act tier) set a one-off reminder from the user's words ("tomorrow 9am", "in 20 minutes", "at 5": the sooner of 05:00 and 17:00, said back), start a countdown, or cancel one by id. Times are worked out in code; a day without a time, days or weeks away, or a time already past are refused so Lucy asks. Enable them with `enabled = [..., "reminders", "set_reminder", "set_timer", "cancel_reminder"]`. When one comes due, `lucy chat` prints it above the prompt (ADR 0020); ones that came due while Lucy was off are delivered, as late, at the next start. A day named with a bare hour ("friday at 5") makes Lucy ask morning or evening. `lucy voice` and `lucy listen` speak them as soon as Lucy is idle (never over the user or another reply); `lucy listen` plays its wake chime first, leaves the follow-up window open afterwards, and starts Lucy on its own for a reminder due before the first wake.
+
+## MCP servers
+
+Lucy can use tools offered by MCP servers (ADR 0022). Nothing runs unless a server is listed in `[mcp] enabled`; the commented example in `lucy.example.toml` shows every key.
+
+1. **Configure** the server under `[mcp.servers.NAME]`: a local program (`command`, `args`, with an exact package version for `uvx`/`npx` and similar) or a remote `url`, and list the tools Lucy may offer under `[mcp.servers.NAME.tools]` with their `risk` (unset means Lucy asks before every call). Secrets go in the macOS Keychain (`env_keychain`, `token_keychain`), never in the file.
+2. **Look** at what it offers: `lucy mcp tools NAME` starts the server and lists each tool, its description, the server's own (untrusted) annotations, and whether it is configured and approved.
+3. **Approve**: `lucy mcp approve NAME` shows the exact command and arguments (or URL) and each configured tool's full description, risk and confirmation question, then asks before pinning them in `lock.json` under `[mcp] path` (default `data/mcp`, which also holds each local server's working directory). Only approved tools are offered to the model; Lucy says at startup how many are waiting.
+4. **Check** at any time: `lucy mcp check NAME` shows the negotiated protocol, the server and SDK versions and compares the tools with what you approved (exit code 1 if anything changed); `--call TOOL --args JSON` runs one `risk = "read"` tool. `lucy mcp list` shows every server's approval state without starting anything.
+
+What can leave the machine: a remote server receives every call's arguments; a local server is a program that may itself use the network. Results are passed to the model with a header saying they are information from that service, not instructions.
+
+After a server update (or a changed command, arguments or URL), a tool whose description or schema changed stops working: calls to it return a message asking you to run `lucy mcp approve NAME` again; unchanged tools keep working. At most `max_tools` (default 8) MCP tools are offered over all enabled servers.
 
 ## Memory eval
 
