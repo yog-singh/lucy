@@ -88,6 +88,8 @@ class WebSearchTool:
         "required": ["query"],
     }
     risk = Risk.READ
+    sends_out = True  # the private-data guard asks first (ADR 0022)
+    destination = "your search service"
 
     def __init__(
         self,

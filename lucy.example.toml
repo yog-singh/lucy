@@ -308,6 +308,9 @@ permission_timeout = 60
 # timeout = 30               # seconds one call may take
 # max_result_chars = 6000    # longest result given to the model
 # private = false            # true for servers holding private data (mail, files)
+#   While a result from a private server is in the conversation, Lucy asks before any
+#   call that sends data out (web search, page fetch, Wikipedia, weather, other
+#   servers, this server's non-read tools), saying what would be sent where.
 #
 # Each listed tool, by the server's name for it. Offered to the model as
 # "<server>_<tool>" (here time_get_current_time) unless `as` names it. `risk`

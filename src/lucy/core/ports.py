@@ -175,7 +175,12 @@ class MemoryStore(Protocol):
 
 @runtime_checkable
 class Tool(Protocol):
-    """Something the assistant can do, with a JSON-schema input and a risk tier (ADR 0006)."""
+    """Something the assistant can do, with a JSON-schema input and a risk tier (ADR 0006).
+
+    Optional attributes for the private-data guard (ADR 0022, `lucy.core.privacy`):
+    `private_source` (results are private, from that source), `sends_out` (a call
+    sends data off this machine) and `destination` (where, in plain words).
+    """
 
     name: str
     description: str

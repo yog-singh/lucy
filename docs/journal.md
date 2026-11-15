@@ -2,6 +2,10 @@
 
 Dated notes on what was built, what failed and what changed. Newest first.
 
+## 2026-11-15: private-data guard
+
+- Results from a `private = true` MCP server now mark the conversation for as long as the model can see them; a call that sends data out (web search, page fetch, Wikipedia, weather, another server) is then asked about first, naming the source and what would be sent where (ADR 0022, run 6). Same-server READ tools and local tools are not asked. Built by a sub-agent; tested with fakes only; not yet committed.
+
 ## 2026-11-15: silent turns
 
 - A chat reply caught in the hidden loop is now retried on the same role up to 3 times (0.6 s each) before `chat_deep`, whose wait for first output is now bounded (60 s), and a turn that stays silent says "Sorry, I lost my train of thought. Could you say that again?" instead of hanging for about 100 s (ADR 0005). Not yet committed.

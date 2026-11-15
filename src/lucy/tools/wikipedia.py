@@ -51,6 +51,8 @@ class WikipediaTool:
         "required": ["query"],
     }
     risk = Risk.READ
+    sends_out = True  # the private-data guard asks first (ADR 0022)
+    destination = "Wikipedia"
 
     def __init__(
         self,

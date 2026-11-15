@@ -42,6 +42,7 @@ from lucy.core.events import (
 from lucy.core.gateway import LLMGateway, Priority, SilentStreamError
 from lucy.core.history import events_to_messages, tool_message
 from lucy.core.ports import ConfirmableTool, MemoryStore, Tool, TraceSink, tool_spec
+from lucy.core.privacy import guard_question, guarded, needs_guard, visible_private_sources
 from lucy.core.reminders import TimerHandler
 from lucy.core.sentences import SentenceSplitter
 from lucy.core.trace import StepTrace, TurnTrace
@@ -355,11 +356,15 @@ class Orchestrator:
             waiting_for = ""
             for call in calls:
                 tool = self._tools.get(call.name)
+                # The private-data guard (ADR 0022) reads what the model sees now.
+                sources = visible_private_sources(messages, self._tools)
+                if tool is None or not needs_guard(tool, sources):
+                    sources = []
                 if question is not None:
                     content = f"Not run: waiting for the user's confirmation of {waiting_for}."
                     result = ToolResult(call_id=call.id, content=content, is_error=True)
-                elif tool is not None and tool.risk == Risk.DANGEROUS:
-                    result, question = await self._request_confirmation(turn, call, tool)
+                elif tool is not None and (tool.risk == Risk.DANGEROUS or sources):
+                    result, question = await self._request_confirmation(turn, call, tool, sources)
                     waiting_for = call.name
                 else:
                     await self._emit(ToolStarted(**self._ids(turn), call=call))
@@ -465,12 +470,25 @@ class Orchestrator:
             logger.warning("preview of %s failed: %s", call.name, _describe(exc))
             return ToolOutput(content=f"Tool {call.name!r} failed: {_describe(exc)}", is_error=True)
 
+    async def _question(self, call: ToolCall, tool: Tool, sources: Sequence[str]) -> ToolOutput:
+        """What to ask before `call`: a dangerous tool's preview, with the private-data
+        notice in front when `sources` are given; for any other tool (asked only
+        because of the guard) a code-built question naming what would be sent where."""
+        if tool.risk == Risk.DANGEROUS:
+            preview = await self._preview(call, tool)
+            if preview.is_error:
+                return preview
+            return ToolOutput(content=guarded(preview.content, sources))
+        if not sources:
+            return ToolOutput(content=f"Tool {call.name!r} needs no confirmation.", is_error=True)
+        return ToolOutput(content=guard_question(tool, call.arguments, sources))
+
     async def _request_confirmation(
-        self, turn: _Turn, call: ToolCall, tool: Tool
+        self, turn: _Turn, call: ToolCall, tool: Tool, sources: Sequence[str] = ()
     ) -> tuple[ToolResult, str | None]:
         """Log a request to confirm `call`. Returns the call's result for the model and
         the question to put to the user (None if the call cannot be previewed)."""
-        preview = await self._preview(call, tool)
+        preview = await self._question(call, tool, sources)
         if preview.is_error:
             return ToolResult(call_id=call.id, content=preview.content, is_error=True), None
         question = preview.content
@@ -480,6 +498,7 @@ class Orchestrator:
                 call=call,
                 question=question,
                 expires_at=_now() + self._confirm_timeout,
+                private_sources=list(sources),
             )
         )
         content = f"Not run yet. The user is being asked: {question}"
@@ -512,7 +531,7 @@ class Orchestrator:
             if tool is None:
                 outcome = "changed"
             else:
-                again = await self._preview(request.call, tool)
+                again = await self._question(request.call, tool, request.private_sources)
                 if again.is_error or again.content != request.question:
                     outcome = "changed"
         # Logged before anything runs: a crash can lose the run but never repeat it.

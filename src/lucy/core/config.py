@@ -530,8 +530,9 @@ class McpServerSettings(BaseModel):
     max_result_chars: int = Field(default=6000, ge=200)
     """Longest result handed to the model, in characters."""
     private: bool = False
-    """The server returns private data (mail, files): later calls in the same turn that
-    could send data elsewhere ask the user first."""
+    """The server returns private data (mail, files): while one of its results is in
+    what the model sees, calls that could send data elsewhere ask the user first
+    (`lucy.core.privacy`)."""
     token_keychain: str | None = Field(default=None, min_length=1)
     """Remote only: the macOS Keychain item (service name) holding the bearer token."""
     env_keychain: dict[str, str] = Field(default_factory=dict)

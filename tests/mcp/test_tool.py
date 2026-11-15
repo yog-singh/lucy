@@ -96,6 +96,13 @@ def test_name_and_alias() -> None:
     assert make(**{"as": "send_mail"}).name == "send_mail"
 
 
+def test_private_data_guard_declarations() -> None:
+    public, private = make(), make(server_extra={"private": True})
+    assert public.sends_out and private.sends_out
+    assert public.private_source is None and private.private_source == "gmail"
+    assert private.destination == "the gmail service"
+
+
 def test_risk_from_settings_never_annotations() -> None:
     hints = {"readOnlyHint": True, "destructiveHint": False}
     assert make(remote_tool=remote(annotations=hints)).risk == Risk.DANGEROUS
