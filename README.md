@@ -179,6 +179,8 @@ What can leave the machine: a remote server receives every call's arguments; a l
 
 After a server update (or a changed command, arguments or URL), a tool whose description or schema changed stops working: calls to it return a message asking you to run `lucy mcp approve NAME` again; unchanged tools keep working. At most `max_tools` (default 8) MCP tools are offered over all enabled servers.
 
+To pin an argument the model must not choose, give the tool `fixed = { argument = value }` (strings, numbers, booleans): the argument is removed from what the model is offered and every call sends that value, whatever the model passes. For example a Gmail server's `user_google_email`, which would start a new sign-in if the model picked another address. A fixed name the server's tool does not have skips the tool, with the reason in the log.
+
 Mark a server that holds private data (mail, files) with `private = true`. While one of its results is in the conversation the model sees (including shortened results from earlier turns), Lucy asks before any call that sends data out: `web_search`, `fetch_page`, `wikipedia`, `weather`, another server's tools, or this server's tools that are not `risk = "read"`. The question names the server and what would be sent where, and only a plain yes runs the call. Local tools and the same server's read tools are not affected.
 
 ## Memory eval

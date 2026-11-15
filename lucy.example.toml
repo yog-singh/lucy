@@ -317,7 +317,10 @@ permission_timeout = 60
 # is "read", "act" or "dangerous" (the default: Lucy asks before every call).
 # Optional: `description` replaces the server's own (at most 200 characters),
 # `guidance` is one sentence for the tool guidance, and `preview` is the
-# question a dangerous tool asks, with {argument} placeholders.
+# question a dangerous tool asks, with {argument} placeholders. `fixed` pins
+# argument values the model never sees or chooses (hidden from its schema, always
+# sent as written), e.g. fixed = { user_google_email = "you@example.com" } for a
+# mail server that would otherwise sign in again for another address.
 # [mcp.servers.time.tools]
 # get_current_time = { risk = "read", guidance = "Use the time_get_current_time tool for the time elsewhere." }
 # convert_time = { risk = "read", as = "convert_time_zone" }
