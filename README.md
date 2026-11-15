@@ -16,7 +16,7 @@ Not built yet:
 
 - Voice stages 2 and 3: interrupting Lucy by speaking (barge-in, with echo cancellation) and a wake word.
 - Tools that act on the home; the lookup tools, the calendar tools below and the confirmation flow for dangerous tools are built.
-- MCP servers over HTTP are untested end to end, OAuth is not supported, and the private-data guard (asking before data from a `private` server is sent elsewhere) is not enforced yet (ADR 0022).
+- MCP servers over HTTP are untested end to end and OAuth is not supported (ADR 0022).
 - Telling Lucy in conversation to forget or correct something (use `lucy memory forget` and `lucy memory correct`).
 - Lucy asking the user to confirm an inference before acting on it.
 
@@ -178,6 +178,8 @@ Lucy can use tools offered by MCP servers (ADR 0022). Nothing runs unless a serv
 What can leave the machine: a remote server receives every call's arguments; a local server is a program that may itself use the network. Results are passed to the model with a header saying they are information from that service, not instructions.
 
 After a server update (or a changed command, arguments or URL), a tool whose description or schema changed stops working: calls to it return a message asking you to run `lucy mcp approve NAME` again; unchanged tools keep working. At most `max_tools` (default 8) MCP tools are offered over all enabled servers.
+
+Mark a server that holds private data (mail, files) with `private = true`. While one of its results is in the conversation the model sees (including shortened results from earlier turns), Lucy asks before any call that sends data out: `web_search`, `fetch_page`, `wikipedia`, `weather`, another server's tools, or this server's tools that are not `risk = "read"`. The question names the server and what would be sent where, and only a plain yes runs the call. Local tools and the same server's read tools are not affected.
 
 ## Memory eval
 

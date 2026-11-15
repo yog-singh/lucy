@@ -162,12 +162,17 @@ class ConfirmationRequested(Event):
     if the user's very next message in this session confirms it before
     `expires_at`. `question` is the tool's preview, which is what the user was
     asked (`lucy.core.confirm`).
+
+    `private_sources` is set when the private-data guard asked (ADR 0022): the
+    private sources then visible to the model, which the question names. The call
+    may be of a tool that is not dangerous.
     """
 
     type: Literal["confirmation_requested"] = "confirmation_requested"
     call: ToolCall
     question: str
     expires_at: AwareDatetime
+    private_sources: list[str] = Field(default_factory=list)
 
     @field_validator("expires_at")
     @classmethod

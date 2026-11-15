@@ -140,6 +140,8 @@ class FetchPageTool:
         "required": ["url"],
     }
     risk = Risk.READ
+    sends_out = True  # the private-data guard asks first (ADR 0022)
+    destination = "the website at that address"
 
     def __init__(
         self,

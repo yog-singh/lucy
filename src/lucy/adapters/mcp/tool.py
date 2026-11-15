@@ -424,6 +424,10 @@ class McpTool:
         self.remote_name = remote.name
         self.name = settings.alias or mcp_tool_name(server, remote.name)
         self.risk: Risk = settings.risk  # never from remote.annotations
+        # The private-data guard (ADR 0022): every call reaches the server.
+        self.sends_out = True
+        self.private_source: str | None = server if server_settings.private else None
+        self.destination = f"the {server} service"
         self.parameters = sanitise_schema(remote.input_schema)  # SchemaRefused propagates
         self._server_settings = server_settings
         self._settings = settings
