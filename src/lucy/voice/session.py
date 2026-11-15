@@ -44,6 +44,16 @@ with the same barge-in. Frames are dropped while announcing (half-duplex), and
 the session listens again afterwards as after a reply. `deliver_reminders`
 runs that in a loop for a client.
 
+Voice enrolment (ADR 0021, amendment): when a turn's `enroll_voice` or
+`replace_voice` call succeeds (seen as its `ToolStarted` and `ToolFinished`), the
+session, still holding the floor, leads an enrolment once the turn has been
+spoken (`_enrol`): it shows each sentence, says a short cue, and reads the
+next utterance itself as a clip, never as a `UserMessage`, so no model turn,
+no speaker tag and nothing for memory. "cancel" or "stop", Enter, a long
+silence or too many bad readings end it with nothing enrolled. The outcome is
+published as a `TimerFired` (`voice_enrolment`), so the orchestrator says and
+logs it as a proactive turn. `enrolling` tells the wake listener to stay awake.
+
 Timings: each turn's moments (speech end, endpoint, transcript, first text,
 first sentence, first TTS audio, first audio played, playback end) are taken on
 the `AudioIO` clock, logged as one line, and appended as one JSON line to
@@ -75,13 +85,24 @@ from lucy.core.events import (
     SpeechActivity,
     TextDelta,
     TimerFired,
+    ToolFinished,
     ToolStarted,
     TurnEnded,
     UserMessage,
 )
 from lucy.core.ports import STT, TTS
+from lucy.tools.voice_enrolment import ENROL_TOOLS, ENROLMENT_TIMER
 from lucy.voice.audio import AudioIO, Frame
 from lucy.voice.endpoint import Discarded, Endpointer, SpeechStarted, UtteranceComplete
+from lucy.voice.enrol import (
+    MIN_OVERLAP,
+    MIN_SPEECH_S,
+    ORDINALS,
+    Enroller,
+    EnrolmentRequest,
+    is_cancel,
+    overlap,
+)
 from lucy.voice.playback import SpeechPlayer
 from lucy.voice.speakers import SpeakerTagger, await_tag
 from lucy.voice.vad import VAD
@@ -286,6 +307,8 @@ class _Turn:
     spoken: str = ""
     interrupt_sent: bool = False
     recorded: bool = False
+    enrol_calls: dict[str, tuple[str, str]] = field(default_factory=dict)  # id -> (tool, name)
+    enrolment: EnrolmentRequest | None = None
 
 
 class VoiceSession:
@@ -311,9 +334,15 @@ class VoiceSession:
         lookahead: int = 1,
         wall_clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         speakers: SpeakerTagger | None = None,
+        enroller: Enroller | None = None,
     ) -> None:
         self._bus = bus
         self._speakers = speakers
+        self._enroller = enroller
+        self._frames: Any = None  # the input's frame iterator, while `run` reads it
+        self._enrolling = False
+        self._enrol_cancel = False
+        self._enrol_player: SpeechPlayer | None = None
         self._session_id = session_id
         self._io = io
         self._vad = vad
@@ -358,6 +387,11 @@ class VoiceSession:
     def hearing_speech(self) -> bool:
         """Whether the user is speaking now (an utterance has started and not ended)."""
         return self._activity == "speaking"
+
+    @property
+    def enrolling(self) -> bool:
+        """Whether a voice enrolment is in progress (the wake listener stays awake)."""
+        return self._enrolling
 
     @property
     def idle(self) -> bool:
@@ -433,7 +467,7 @@ class VoiceSession:
         if self._subscription is not None:
             raise RuntimeError("VoiceSession.run can only be called once")
         self._subscription = self._bus.subscribe(
-            TextDelta, SentenceReady, AssistantMessage, ToolStarted, TurnEnded
+            TextDelta, SentenceReady, AssistantMessage, ToolStarted, ToolFinished, TurnEnded
         )
         pump = asyncio.create_task(self._pump(self._subscription), name="lucy-voice-events")
         self._main = asyncio.create_task(self._listen(), name="lucy-voice-listen")
@@ -457,8 +491,14 @@ class VoiceSession:
     def interrupt(self) -> bool:
         """Stop Lucy if she is thinking or speaking (see the module docstring).
 
-        Returns whether there was anything to interrupt.
+        Returns whether there was anything to interrupt. During a voice enrolment
+        it cancels the enrolment.
         """
+        if self._enrolling and self._turn is None:
+            self._enrol_cancel = True
+            if self._enrol_player is not None:
+                self._enrol_player.stop()
+            return True
         turn, player = self._turn, self._player
         if turn is None or turn.interrupted:
             return False
@@ -502,6 +542,7 @@ class VoiceSession:
 
     async def _listen(self) -> None:
         frames = self._io.frames()
+        self._frames = frames
         try:
             async for frame in frames:
                 if self._bus_closed:
@@ -569,7 +610,7 @@ class VoiceSession:
         )
         self._set_state(VoiceState.TRANSCRIBING)
         await self._speech_activity("transcribing")
-        replied = False
+        replied = recorded = False
         message_id = str(uuid.uuid4())
         tagging = (
             self._speakers.start(utterance.audio, message_id)
@@ -611,15 +652,23 @@ class VoiceSession:
                 audio_path=tag.audio_path if tag is not None else None,
                 audio_s=round(utterance.duration, 3),
             )
-            await self._converse(message, timings)
+            request = await self._converse(message, timings)
+            if request is not None:
+                self._record(timings)
+                recorded = True
+                await self._enrol(request)
         finally:
             await self._speech_activity("idle")
-            self._record(timings)
+            if not recorded:
+                self._record(timings)
             self._listen_again(gate=replied)
 
-    async def _converse(self, inbound: UserMessage | TimerFired, timings: TurnTimings) -> None:
+    async def _converse(
+        self, inbound: UserMessage | TimerFired, timings: TurnTimings
+    ) -> EnrolmentRequest | None:
         """Publish `inbound` and speak its turn. The turn is registered as expected
-        before publishing: turns of a session run in publication order."""
+        before publishing: turns of a session run in publication order. Returns the
+        voice enrolment the turn requested, if it completed with one."""
         turn = _Turn()
         io = self._io
 
@@ -672,6 +721,16 @@ class VoiceSession:
                         turn.boundary = player.sentence_count
                 elif isinstance(event, ToolStarted):
                     self._notice(f"[using {event.call.name}]")
+                    name = event.call.arguments.get("name")
+                    if event.call.name in ENROL_TOOLS and isinstance(name, str):
+                        turn.enrol_calls[event.call.id] = (event.call.name, name)
+                elif isinstance(event, ToolFinished):
+                    call = turn.enrol_calls.get(event.result.call_id)
+                    if call is not None and not event.result.is_error:
+                        tool, name = call
+                        turn.enrolment = EnrolmentRequest(
+                            name=_enrolled_name(name), replace=tool == "replace_voice"
+                        )
                 elif isinstance(event, TurnEnded):
                     timings.outcome = event.reason
                     timings.error = event.error
@@ -693,6 +752,178 @@ class VoiceSession:
                     self._ui.reply_end("interrupted", None)
                 await self._report_interrupt(turn)
             await player.aclose()
+        if turn.interrupted or timings.outcome != "completed":
+            return None
+        return turn.enrolment
+
+    # --- Voice enrolment -------------------------------------------------------------
+
+    async def _enrol(self, request: EnrolmentRequest) -> None:
+        """Lead a voice enrolment (see the module docstring), then have the outcome said."""
+        if self._enroller is None or self._frames is None:
+            text = "Sorry, I can't record voices here: speaker identification is not running."
+        else:
+            self._enrolling, self._enrol_cancel = True, False
+            try:
+                text = await self._enrolment(self._enroller, request)
+            except Exception:
+                logger.exception("voice enrolment failed")
+                text = "Sorry, the voice enrolment failed. Nothing was enrolled."
+            finally:
+                self._enrolling = False
+                self._enrol_player = None
+        logger.info("voice enrolment of %s: %s", request.name, text)
+        now = self._io.now()
+        timings = TurnTimings(
+            session_id=self._session_id,
+            at=self._wall_clock().isoformat(),
+            speech_start=now,
+            speech_end=now,
+            endpoint=now,
+            utterance_s=0.0,
+        )
+        self._listen_again(gate=True)
+        event = TimerFired(
+            session_id=self._session_id,
+            name=ENROLMENT_TIMER,
+            payload={"text": text, "speaker": request.name, "replace": request.replace},
+        )
+        await self._converse(event, timings)  # like `announce`: no latency record
+
+    async def _enrolment(self, enroller: Enroller, request: EnrolmentRequest) -> str:
+        """The enrolment itself; returns the outcome to say."""
+        sentences = enroller.pick()
+        count = len(sentences)
+        stopped = "Nothing was enrolled."
+        intro = (
+            f"I'll show you {_number(count)} sentences. Read each one aloud after it "
+            "appears. Say cancel to stop."
+        )
+        self._notice(intro)
+        if not await self._cue(intro):
+            return f"I stopped the voice enrolment. {stopped}"
+        clips: list[Any] = []
+        for index, sentence in enumerate(sentences):
+            ordinal = ORDINALS[index] if index < len(ORDINALS) else f"Sentence {index + 1}"
+            cue = f"{ordinal} sentence." if index < len(ORDINALS) else f"{ordinal}."
+            failures = 0
+            while True:
+                if not await self._cue(cue):
+                    return f"I stopped the voice enrolment. {stopped}"
+                # Shown only once the session is listening (after the cue and the tail
+                # drop), so a reading started the moment it appears is not clipped.
+                heard = await self._hear(
+                    enroller.silence_s,
+                    on_listening=lambda i=index, s=sentence: self._show_sentence(i, count, s),
+                )
+                if heard == "cancelled":
+                    return f"I stopped the voice enrolment. {stopped}"
+                if heard == "silence":
+                    return f"I didn't hear anything, so I stopped the voice enrolment. {stopped}"
+                if heard == "ended":
+                    return f"The voice enrolment ended early. {stopped}"
+                audio, seconds, text = heard
+                if is_cancel(text):
+                    return f"Okay, I stopped the voice enrolment. {stopped}"
+                if seconds < MIN_SPEECH_S:
+                    problem = "That was too short."
+                elif overlap(sentence, text) < MIN_OVERLAP:
+                    problem = "That didn't sound like the sentence."
+                else:
+                    clips.append(audio)
+                    break
+                failures += 1
+                logger.info("enrolment reading rejected (%s): %r", problem, text)
+                if failures > enroller.retries:
+                    return f"I couldn't get a clear reading, so I stopped. {stopped}"
+                cue = f"{problem} Please read it again."
+        self._notice("[saving the voice]")
+        self._set_state(VoiceState.THINKING)
+        return await enroller.enrol(request.name, clips)
+
+    def _show_sentence(self, index: int, count: int, sentence: str) -> None:
+        show = getattr(self._ui, "enrol_sentence", None)
+        try:
+            if show is not None:
+                show(index + 1, count, sentence)
+            else:
+                self._ui.notice(f"Sentence {index + 1} of {count}, read aloud:  {sentence}")
+        except Exception:
+            logger.exception("the voice UI failed")
+
+    async def _cue(self, text: str) -> bool:
+        """Say a short code-authored cue (not logged); False if the user cancelled."""
+        if self._enrol_cancel:
+            return False
+        player = SpeechPlayer(
+            self._tts,
+            self._io,
+            lookahead=self._lookahead,
+            on_error=lambda sentence, exc: self._notice(
+                f"could not speak a sentence ({type(exc).__name__}: {exc})"
+            ),
+        )
+        self._enrol_player = player
+        self._set_state(VoiceState.SPEAKING)
+        try:
+            player.add(text)
+            await player.wait()
+        finally:
+            self._enrol_player = None
+            await player.aclose()
+            self._listen_again(gate=True)
+        return not self._enrol_cancel
+
+    async def _hear(
+        self, silence_s: float, *, on_listening: Callable[[], None] | None = None
+    ) -> tuple[Any, float, str] | Literal["cancelled", "silence", "ended"]:
+        """Read frames until one utterance is complete and transcribe it; it never
+        becomes a `UserMessage`. `on_listening` is called once, at the first frame
+        that is heard (past the post-playback drop), before that frame is used."""
+        started: float | None = None
+        while True:
+            try:
+                frame = await anext(self._frames)
+            except StopAsyncIteration:
+                for event in self._endpointer.flush(self._io.now()):
+                    if isinstance(event, UtteranceComplete):
+                        return await self._transcribe_reading(event)
+                return "ended"
+            if self._enrol_cancel:
+                return "cancelled"
+            if frame.time <= self._gate_until:
+                continue
+            if started is None:
+                started = frame.time
+                if on_listening is not None:
+                    on_listening()
+            probability = self._vad(frame.audio)
+            for event in self._endpointer.feed(frame.audio.data, probability, frame.time):
+                if isinstance(event, SpeechStarted):
+                    await self._speech_activity("speaking")
+                    self._prepare_stt()
+                elif isinstance(event, Discarded):
+                    await self._speech_activity("idle")
+                    started = frame.time
+                elif isinstance(event, UtteranceComplete):
+                    return await self._transcribe_reading(event)
+            if not self.hearing_speech and frame.time - started > silence_s:
+                return "silence"
+
+    async def _transcribe_reading(self, utterance: UtteranceComplete) -> tuple[Any, float, str]:
+        self._set_state(VoiceState.TRANSCRIBING)
+        await self._speech_activity("transcribing")
+        try:
+            text = (await self._stt.transcribe(utterance.audio)).text.strip()
+        except Exception as exc:
+            logger.warning("speech recognition failed during enrolment: %s", exc)
+            text = ""
+        await self._speech_activity("idle")
+        try:
+            self._ui.user(text)
+        except Exception:
+            logger.exception("the voice UI failed")
+        return utterance.audio, utterance.duration, text
 
     async def _report_interrupt(self, turn: _Turn) -> None:
         """Publish what the interruption of `turn` calls for, as far as is known now; the
@@ -789,6 +1020,20 @@ class VoiceSession:
                 file.write(json.dumps(timings.to_json()) + "\n")
         except OSError as exc:
             logger.warning("cannot write voice timings to %s: %s", self._timings_path, exc)
+
+
+def _enrolled_name(name: str) -> str:
+    from lucy.tools.voice_enrolment import clean_name
+
+    try:
+        return clean_name(name)
+    except ValueError:
+        return name
+
+
+def _number(count: int) -> str:
+    names = ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight")
+    return names[count] if 0 <= count < len(names) else str(count)
 
 
 class ReminderSource(Protocol):

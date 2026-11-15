@@ -396,6 +396,8 @@ class WakeListener:
     def _session_idle(self) -> bool:
         if self._session is None:
             return False  # still starting: the wake turn has not been heard yet
+        if self._session.enrolling:
+            return False  # a voice enrolment: awake until it ends, without the wake phrase
         return self._session_state == VoiceState.LISTENING and not self._session.hearing_speech
 
     async def _frames(self, source: AsyncIterator[Frame]) -> AsyncIterator[Frame]:

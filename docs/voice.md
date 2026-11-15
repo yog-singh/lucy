@@ -128,7 +128,7 @@ With voice, what Lucy generated and what the user heard can differ: the user may
 
 ## Who is speaking
 
-Optional and off by default (`[speakers]`, ADR 0021). Each utterance is saved as a 16 kHz WAV in the workspace (`data/workspace/utterances/`, kept 1 day by default) and identified with `voice-fingerprint` concurrently with transcription; the turn waits at most `wait_ms` (150) after the transcript for the result. The name and score are recorded on the `UserMessage` and in the timings; nothing else uses them yet. Setup: `lucy speakers download`, then `lucy speakers enroll NAME a.wav b.wav c.wav`; `lucy speakers identify FILE` shows the scores. A voice match is not a security check.
+Optional and off by default (`[speakers]`, ADR 0021). Each utterance is saved as a 16 kHz WAV in the workspace (`data/workspace/utterances/`, kept 1 day by default) and identified with `voice-fingerprint` concurrently with transcription; the turn waits at most `wait_ms` (150) after the transcript for the result. The name and score are recorded on the `UserMessage` and in the timings; nothing else uses them yet. Setup: `lucy speakers download`, then `lucy speakers enroll NAME a.wav b.wav c.wav`; `lucy speakers identify FILE` shows the scores. A voice match is not a security check. With the `enroll_voice` and `replace_voice` tools enabled, saying "enrol my voice" in `lucy voice` or `lucy listen` starts an enrolment Lucy leads herself: each sentence is shown on screen, the reading is recorded (not sent to the model), and the voice is enrolled at the end; "cancel" or Enter stops it.
 
 ## Memory budget
 

@@ -40,6 +40,7 @@ from lucy.tools.reminders import (
     SetTimerTool,
     build_store,
 )
+from lucy.tools.voice_enrolment import EnrollVoiceTool, ReplaceVoiceTool
 from lucy.tools.weather import WeatherTool
 from lucy.tools.web_search import WebSearchTool
 from lucy.tools.wikipedia import WikipediaTool
@@ -85,6 +86,8 @@ CATALOGUE: Final[dict[str, Factory]] = {
     "cancel_reminder": lambda s, _transport, _resolver, clock: CancelReminderTool(
         s.tools.reminders, store=build_store(s, clock), clock=clock
     ),
+    "enroll_voice": lambda s, _transport, _resolver, _clock: EnrollVoiceTool(s),
+    "replace_voice": lambda s, _transport, _resolver, _clock: ReplaceVoiceTool(s),
 }
 
 
