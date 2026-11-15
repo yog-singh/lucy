@@ -55,6 +55,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import uuid
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
@@ -82,6 +83,7 @@ from lucy.core.ports import STT, TTS
 from lucy.voice.audio import AudioIO, Frame
 from lucy.voice.endpoint import Discarded, Endpointer, SpeechStarted, UtteranceComplete
 from lucy.voice.playback import SpeechPlayer
+from lucy.voice.speakers import SpeakerTagger, await_tag
 from lucy.voice.vad import VAD
 
 logger = logging.getLogger(__name__)
@@ -205,6 +207,8 @@ class TurnTimings:
     reply_audio_s: float = 0.0
     spoken_chars: int | None = None
     error: str | None = None
+    speaker: str | None = None
+    speaker_ready: float | None = None  # when the speaker tag was taken, if in time
 
     def stages(self) -> dict[str, float | None]:
         """Durations of each stage, and end of speech to first audio (`total`)."""
@@ -230,6 +234,7 @@ class TurnTimings:
             "speech_start",
             "endpoint",
             "transcript_ready",
+            "speaker_ready",
             "first_text_delta",
             "first_sentence",
             "first_tts_audio",
@@ -305,8 +310,10 @@ class VoiceSession:
         timings_path: str | Path | None = None,
         lookahead: int = 1,
         wall_clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        speakers: SpeakerTagger | None = None,
     ) -> None:
         self._bus = bus
+        self._speakers = speakers
         self._session_id = session_id
         self._io = io
         self._vad = vad
@@ -563,6 +570,12 @@ class VoiceSession:
         self._set_state(VoiceState.TRANSCRIBING)
         await self._speech_activity("transcribing")
         replied = False
+        message_id = str(uuid.uuid4())
+        tagging = (
+            self._speakers.start(utterance.audio, message_id)
+            if self._speakers is not None
+            else None
+        )  # concurrently with transcription; see `lucy.voice.speakers`
         try:
             try:
                 transcript = await self._stt.transcribe(utterance.audio)
@@ -577,11 +590,28 @@ class VoiceSession:
             if not text:
                 timings.outcome = "no_speech"
                 return
-            self._ui.user(text)
+            tag = None
+            if tagging is not None and self._speakers is not None:
+                tag = await await_tag(tagging, self._speakers.wait_s)
+                timings.speaker_ready = self._io.now() if tag is not None else None
+                timings.speaker = tag.speaker if tag is not None else None
+            show = getattr(self._ui, "user_speaker", None)
+            if tag is not None and tag.speaker is not None and show is not None:
+                show(text, tag.speaker)
+            else:
+                self._ui.user(text)
             replied = True
-            await self._converse(
-                UserMessage(session_id=self._session_id, text=text, source="voice"), timings
+            message = UserMessage(
+                id=message_id,
+                session_id=self._session_id,
+                text=text,
+                source="voice",
+                speaker=tag.speaker if tag is not None else None,
+                speaker_score=tag.score if tag is not None else None,
+                audio_path=tag.audio_path if tag is not None else None,
+                audio_s=round(utterance.duration, 3),
             )
+            await self._converse(message, timings)
         finally:
             await self._speech_activity("idle")
             self._record(timings)

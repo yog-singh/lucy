@@ -98,6 +98,36 @@ followup_seconds = 8
 # A short chime on waking, and a falling one on going back to waiting.
 chime            = true
 
+[workspace]
+# Optional; the default. Lucy's own directory for files her code writes and
+# reads (speaker book, voice clips), created owner-only (0700). No tool gives
+# the chat model access to it.
+path = "data/workspace"
+
+[speakers]
+# Optional; these are the defaults. Off unless enabled. Tags each voice
+# utterance with who spoke (stage 1: recorded on the message and in the turn
+# timings; nothing Lucy does changes yet). Run `lucy speakers download` once
+# (~27 MB model into data/models/speaker/), then enrol voices with
+# `lucy speakers enroll NAME clip1.wav clip2.wav clip3.wav`.
+# A voice match is a label, not a security check: a recording of an enrolled
+# voice matches as well as the person does.
+enabled              = false
+weights              = "data/models/speaker/voxceleb_resnet34_LM.onnx"
+# Cosine score from which a voice counts as an enrolled speaker. 0.40 is the
+# library's starting point; check it against your own clips
+# (`lucy speakers identify FILE`).
+threshold            = 0.40
+# How long a turn waits for identification once the transcript is ready; if it
+# is not done by then the turn goes ahead without a tag.
+wait_ms              = 150
+# Each utterance is stored locally as a 16 kHz WAV in <workspace>/utterances/
+# for this many days, briefly, so voices can still be identified or tagged
+# later on request (0: deleted right after identification), and the oldest
+# go first beyond this many MB.
+keep_utterances_days = 1
+max_utterances_mb    = 200
+
 [embedder]
 # Ollama adds no prefixes (the model template is the bare prompt), so the
 # adapter prepends them by kind. For embeddinggemma-2, "query: " / "passage: "

@@ -8,6 +8,8 @@ signatures.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from lucy.core.events import AnyEvent
@@ -96,6 +98,33 @@ class STT(Protocol):
     async def transcribe(self, audio: AudioChunk) -> Transcript:
         """Transcribe one utterance."""
         ...
+
+
+@dataclass(frozen=True)
+class SpeakerMatch:
+    """One enrolled speaker scored against a clip. `accepted`: the score reached the
+    threshold. A match is a label, never an authorisation (ADR 0021)."""
+
+    name: str
+    score: float
+    accepted: bool
+
+
+@runtime_checkable
+class SpeakerIdentifier(Protocol):
+    """Who is speaking in an audio file (blocking: call it off the event loop)."""
+
+    def identify(self, path: Path) -> list[SpeakerMatch]:
+        """Enrolled speakers ranked best first; empty when nobody is enrolled."""
+        ...
+
+    def enroll(self, name: str, paths: Sequence[Path]) -> None: ...
+
+    def speakers(self) -> dict[str, int]:
+        """Enrolled names and how many clips each was enrolled from."""
+        ...
+
+    def remove(self, name: str) -> None: ...
 
 
 @runtime_checkable

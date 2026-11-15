@@ -126,6 +126,10 @@ With voice, what Lucy generated and what the user heard can differ: the user may
 - The event is appended to the episode log. When the conversation is rebuilt, the reply for that turn is replaced by the spoken text and marked interrupted.
 - Nothing already in the log is edited, so the log stays append-only.
 
+## Who is speaking
+
+Optional and off by default (`[speakers]`, ADR 0021). Each utterance is saved as a 16 kHz WAV in the workspace (`data/workspace/utterances/`, kept 1 day by default) and identified with `voice-fingerprint` concurrently with transcription; the turn waits at most `wait_ms` (150) after the transcript for the result. The name and score are recorded on the `UserMessage` and in the timings; nothing else uses them yet. Setup: `lucy speakers download`, then `lucy speakers enroll NAME a.wav b.wav c.wav`; `lucy speakers identify FILE` shows the scores. A voice match is not a security check.
+
 ## Memory budget
 
 The survey found the chat model occupying 16.2 GB in Ollama, shown with a 262,144-token context. With the speech models added the machine would be at about 20 GB of 24 and was already swapping.

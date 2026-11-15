@@ -383,6 +383,40 @@ class WakeSettings(BaseModel):
     """Play a short chime on waking and on going back to waiting."""
 
 
+class WorkspaceSettings(BaseModel):
+    """Lucy's own directory for files her code writes and reads (`lucy.core.workspace`).
+
+    Not reachable from the chat model: no tool reads or writes it.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    path: str = "data/workspace"
+
+
+class SpeakersSettings(BaseModel):
+    """Who is speaking (stage 1: each voice utterance is tagged; nothing else changes).
+
+    A voice match is a label, never an authorisation: a recording of an enrolled
+    speaker scores as high as the speaker.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    enabled: bool = False
+    weights: str = "data/models/speaker/voxceleb_resnet34_LM.onnx"
+    """The WeSpeaker ResNet34 ONNX model; `lucy speakers download` fetches it."""
+    threshold: float = Field(default=0.40, gt=-1, lt=1)
+    """Cosine score from which a voice counts as an enrolled speaker. The library's
+    default; calibrate it on your own clips."""
+    wait_ms: int = Field(default=150, ge=0, le=5000)
+    """How long a turn waits for identification after transcription is done."""
+    keep_utterances_days: float = Field(default=1.0, ge=0)
+    """How long utterance clips are kept; 0 deletes each right after identification."""
+    max_utterances_mb: float = Field(default=200.0, ge=0)
+    """Size cap for kept utterance clips; the oldest go first."""
+
+
 class ContextSettings(BaseModel):
     """How the chat prompt is arranged (see `lucy.core.context`)."""
 
@@ -438,6 +472,8 @@ class Settings(BaseModel):
     wake: WakeSettings = Field(default_factory=WakeSettings)
     context: ContextSettings = Field(default_factory=ContextSettings)
     residency: ResidencySettings = Field(default_factory=ResidencySettings)
+    workspace: WorkspaceSettings = Field(default_factory=WorkspaceSettings)
+    speakers: SpeakersSettings = Field(default_factory=SpeakersSettings)
 
 
 def load_settings(path: str | Path) -> Settings:
