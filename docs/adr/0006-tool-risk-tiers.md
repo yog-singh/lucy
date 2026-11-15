@@ -23,6 +23,8 @@ Amended 2026-11-14: confirmation works as follows, and the orchestrator stays st
 
 Amended 2026-11-14 (ADR 0020): Lucy may now speak first. No reminder is delivered while a confirmation request is open (unresolved, unanswered, unexpired), and a `TimerFired` logged after a request ends it: the proactive turn logs it as superseded and tells the user the change was not made, so a "yes" after a reminder never runs the older call.
 
+Amended 2026-11-15 (ADR 0022): a tool that cannot resolve its target before running (an MCP tool: Lucy cannot ask the service what a call would do) may use a generic preview built by code from its name and arguments, provided the question says so ("... I can't check what it will do first."). It must still be deterministic from the arguments and side-effect free, so the re-preview check applies unchanged.
+
 ## Consequences
 
 - A misheard command cannot send a message or delete data on its own.

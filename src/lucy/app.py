@@ -78,7 +78,7 @@ from lucy.core.events import TurnEnded
 from lucy.core.gateway import LLMGateway, Preempted, add_fallbacks
 from lucy.core.jobs import Handler, Job, JobRunner, JobStatus, utc_now
 from lucy.core.orchestrator import Orchestrator
-from lucy.core.ports import STT, TTS, Embedder, MemoryStore, Tool, TraceSink
+from lucy.core.ports import STT, TTS, Embedder, MemoryStore, Tool, ToolProvider, TraceSink
 from lucy.core.registry import Registry
 from lucy.core.reminders import REMINDER_TIMER, ReminderService, TimerHandler
 from lucy.core.residency import Residency
@@ -148,11 +148,27 @@ TRANSIENT_JOB_ERRORS: Final = (*DEFAULT_TRANSIENT_ERRORS, LLMError, EmbedderErro
 """Errors that never make extraction skip a turn (a server outage says nothing about it)."""
 
 
+def build_tool_providers(settings: Settings) -> list[ToolProvider]:
+    """The tool providers configured in `settings` (ADR 0022): an MCP provider when
+    `[mcp] enabled` lists servers, else none (and the MCP SDK is never imported)."""
+    if not settings.mcp.enabled:
+        return []
+    from lucy.adapters.mcp.provider import McpToolProvider
+    from lucy.adapters.mcp.secrets import KeychainSecrets
+
+    return [McpToolProvider(settings.mcp, secrets=KeychainSecrets(), root=settings.mcp.path)]
+
+
 _NAMED_TOOL: Final = re.compile(r"\bthe (\w+) tool\b")
 _ABOUT_CONFIRMING: Final = re.compile(r"\bask the user for confirmation themselves\b")
 
 
-def system_prompt(tools: bool | Collection[str], *, confirming: bool | None = None) -> str:
+def system_prompt(
+    tools: bool | Collection[str],
+    *,
+    confirming: bool | None = None,
+    extra_guidance: Sequence[str] = (),
+) -> str:
     """The fixed part of the system prompt: the persona, plus the tool guidance
     (`prompts/tools.md`) when any tool is enabled.
 
@@ -164,11 +180,17 @@ def system_prompt(tools: bool | Collection[str], *, confirming: bool | None = No
     `confirming` is whether any enabled tool asks the user before it runs
     (`Risk.DANGEROUS`, ADR 0006); the sentence about such tools is left out when
     not. It defaults to true when `tools` is True and false for a list of names.
+
+    `extra_guidance` are sentences from tool providers (the user's per-tool MCP
+    `guidance`), appended as one paragraph before filtering, so each must name its
+    tool as "the NAME tool" and is kept only while that tool is enabled.
     """
     persona = load_prompt("persona").strip()
     if not tools:
         return persona
     guidance = load_prompt("tools").strip()
+    if extra_guidance:
+        guidance += "\n\n" + " ".join(" ".join(s.split()) for s in extra_guidance)
     if not isinstance(tools, bool):
         enabled = set(tools)
 
@@ -277,6 +299,9 @@ class LucyApp:
     enabled`, none by default);
     tests pass one that injects a mock HTTP transport. With no tools, no tool
     specs are offered and the system prompt is the persona alone.
+    `provider_builder` builds the `ToolProvider`s (ADR 0022; default
+    `build_tool_providers`, none yet); they are started during `start`, their
+    tools offered after the built-in ones, and they are closed on `stop`.
 
     `speech=True` (for `lucy voice`) also builds the `[stt]` and `[tts]`
     adapters and warms them up during `start` (loading the speech recogniser,
@@ -301,6 +326,7 @@ class LucyApp:
         clock: Callable[[], datetime] = utc_now,
         profile_delay: float | None = None,
         tool_builder: Callable[[Settings], Sequence[Tool]] | None = None,
+        provider_builder: Callable[[Settings], Sequence[ToolProvider]] | None = None,
         speech: bool = False,
     ) -> None:
         self.settings = settings
@@ -313,6 +339,9 @@ class LucyApp:
         self._reminder_store: SQLiteReminderStore | None = None
         self._reminders: ReminderService | None = None
         self._tools: list[Tool] = []
+        self._provider_builder = provider_builder or build_tool_providers
+        self._providers: list[ToolProvider] = []
+        self._own_tools: list[Tool] = []
         self._registry = registry
         self._background = background
         self._retrieval_timeout = retrieval_timeout
@@ -491,6 +520,14 @@ class LucyApp:
                 )
                 timer_handlers[REMINDER_TIMER] = self._reminders.handle
             self._tools = list(self._tool_builder(self.settings))
+            self._own_tools = list(self._tools)  # closed by the app; the rest by providers
+            self._providers = list(self._provider_builder(self.settings))
+            extra_guidance: list[str] = []
+            for provider in self._providers:
+                await provider.start()
+                self._tools.extend(provider.tools())
+                # Optional on the port: the MCP provider's per-tool guidance.
+                extra_guidance.extend(getattr(provider, "guidance", list)())
             for tool in self._tools:
                 if hasattr(tool, "voice_client"):  # the voice enrolment tools
                     tool.voice_client = self._speech  # type: ignore[attr-defined]
@@ -500,6 +537,7 @@ class LucyApp:
                 system_prompt(
                     [t.name for t in self._tools],
                     confirming=any(t.risk == Risk.DANGEROUS for t in self._tools),
+                    extra_guidance=extra_guidance,
                 ),
                 clock=lambda: clock().astimezone(),
                 layout=self.settings.context.layout,
@@ -786,7 +824,11 @@ class LucyApp:
                     if id(llm) not in closed:
                         closed.add(id(llm))
                         await _close_quietly(llm, "aclose")
-            tools, self._tools = self._tools, []
+            # Providers before the tools and stores: their tools may use them.
+            providers, self._providers = self._providers, []
+            for provider in reversed(providers):
+                await _close_quietly(provider, "aclose")
+            tools, self._own_tools, self._tools = self._own_tools, [], []
             for tool in tools:
                 await _close_quietly(tool, "aclose")
             self._reminders = None

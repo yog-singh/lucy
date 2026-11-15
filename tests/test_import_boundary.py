@@ -145,3 +145,50 @@ def test_only_the_store_and_its_constructors_import_graph_store(path: Path) -> N
 )
 def test_graph_store_checker_catches_every_form(source: str, imports: bool) -> None:
     assert imports_graph_store(ast.parse(source), ["lucy", "memory"]) is imports
+
+
+# --- Only the MCP adapter's `sdk.py` imports the MCP SDK (ADR 0022) ------------
+
+MCP_SDK_MODULES = ("mcp", "mcp_types")
+MCP_SDK_IMPORTER = "adapters/mcp/sdk.py"
+
+
+def imports_mcp_sdk(tree: ast.Module, package: list[str]) -> bool:
+    return any(
+        m == root or m.startswith(f"{root}.")
+        for m in imported_modules(tree, package)
+        for root in MCP_SDK_MODULES
+    )
+
+
+def test_mcp_sdk_importer_exists() -> None:
+    assert (SRC / "lucy" / MCP_SDK_IMPORTER).is_file()
+
+
+@pytest.mark.parametrize(
+    "path",
+    [p for p in LUCY_FILES if p.relative_to(SRC / "lucy").as_posix() != MCP_SDK_IMPORTER],
+    ids=lambda p: p.relative_to(SRC / "lucy").as_posix(),
+)
+def test_only_the_sdk_module_imports_mcp(path: Path) -> None:
+    tree = ast.parse(path.read_text(), filename=str(path))
+    assert not imports_mcp_sdk(tree, package_of(path)), (
+        f"{path.relative_to(SRC)} imports the MCP SDK; go through lucy.adapters.mcp.sdk"
+    )
+
+
+@pytest.mark.parametrize(
+    ("source", "imports"),
+    [
+        ("import mcp", True),
+        ("import mcp.client.stdio", True),
+        ("from mcp import Client", True),
+        ("from mcp_types import Tool", True),
+        ("import mcp_types as t", True),
+        ("from lucy.adapters.mcp import sdk", False),
+        ("from . import mcp", False),
+        ("import mcpx", False),
+    ],
+)
+def test_mcp_sdk_checker_catches_every_form(source: str, imports: bool) -> None:
+    assert imports_mcp_sdk(ast.parse(source), ["lucy", "adapters", "mcp"]) is imports

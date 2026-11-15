@@ -274,6 +274,60 @@ calendars = []
 # Seconds to wait for you to answer macOS's permission dialog.
 permission_timeout = 60
 
+# [mcp]
+# Optional. MCP servers whose tools Lucy may use (docs/adr/0022-mcp-client.md).
+# Nothing is enabled by default (the example below is commented out). After
+# configuring a server, review and approve its tools:
+#   lucy mcp tools time      # what the server offers, and each tool's state
+#   lucy mcp approve time    # shows the exact command and descriptions, then pins them
+# Approval is recorded in lock.json under `path` (default data/mcp). A configured tool that is not
+# approved is not offered to the model (Lucy says so once at startup). If the
+# command or arguments change, or the server changes an approved tool's
+# description or schema, that tool is not used until you approve again. An enabled server can send data off this
+# machine, depending on what it does: a local server is a program Lucy starts
+# that may itself use the internet; a remote server receives every call's
+# arguments. Only the tools listed under a server are offered to the model,
+# and at most `max_tools` (default 8) over all enabled servers.
+# enabled = ["time"]
+# max_tools = 8
+# The approval file (lock.json) and each server's working directory
+# (<path>/<server>/) live here, like [memory] path and [workspace] path.
+# path = "data/mcp"
+#
+# A local server: a program Lucy starts and talks to over its standard input
+# and output. Package launchers (npx, bunx, pnpm dlx, uvx, uv tool run,
+# pipx run) must name an exact version ("name==1.2.3" or "name@1.2.3"); an
+# unversioned package or "latest" is refused, so an update never arrives
+# unannounced. The version below is an EXAMPLE: check PyPI for the current one.
+# [mcp.servers.time]
+# command = "uvx"
+# args = ["mcp-server-time==2026.1.0", "--local-timezone=Europe/London"]
+# env = { }                  # variables for the program (no secrets here)
+# env_from = []              # names of Lucy's own variables passed on as they are
+# env_keychain = { }         # VARIABLE = "Keychain item" for secrets
+# timeout = 30               # seconds one call may take
+# max_result_chars = 6000    # longest result given to the model
+# private = false            # true for servers holding private data (mail, files)
+#
+# Each listed tool, by the server's name for it. Offered to the model as
+# "<server>_<tool>" (here time_get_current_time) unless `as` names it. `risk`
+# is "read", "act" or "dangerous" (the default: Lucy asks before every call).
+# Optional: `description` replaces the server's own (at most 200 characters),
+# `guidance` is one sentence for the tool guidance, and `preview` is the
+# question a dangerous tool asks, with {argument} placeholders.
+# [mcp.servers.time.tools]
+# get_current_time = { risk = "read", guidance = "Use the time_get_current_time tool for the time elsewhere." }
+# convert_time = { risk = "read", as = "convert_time_zone" }
+#
+# A remote server over HTTPS, with a bearer token kept in the macOS Keychain
+# (never in this file). Create the item with:
+#   security add-generic-password -s lucy-mcp-example -a lucy -w
+# [mcp.servers.example]
+# url = "https://mcp.example.com/mcp"
+# token_keychain = "lucy-mcp-example"
+# [mcp.servers.example.tools]
+# send_message = { as = "send_message", preview = "Send a message to {to} saying {text}?" }
+
 [context]
 # Optional; this is the default. How the chat prompt is arranged.
 # "stable_prefix": the system message holds only what rarely changes (persona,
