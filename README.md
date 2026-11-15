@@ -109,6 +109,8 @@ uv run lucy listen                     # say "hey jarvis, what's the weather in 
 - Half-duplex as in `lucy voice`: while she thinks or speaks the microphone, including the wake word, is ignored; Enter stops her, Ctrl-C quits.
 - `[wake]` in `lucy.example.toml` sets the phrase, model, threshold (0.5), follow-up window and chimes. File mode (`--input-wav`, `--output-wav`, `--fast`, `--wait-for-reply`) works as for `lucy voice`.
 
+Speaker tagging (optional, off by default): `lucy speakers download`, `lucy speakers enroll NAME clip.wav...`, `lucy speakers list | remove NAME | identify FILE`, then `[speakers] enabled = true`. Voice turns then record who spoke; see docs/voice.md and ADR 0021.
+
 ## Memory commands
 
 `uv run lucy memory ACTION` inspects and controls what Lucy has learned. Every action takes `--config PATH` and `--verbose`. Statement and entity ids are printed as `#12`.

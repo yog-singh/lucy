@@ -61,6 +61,16 @@ class UserMessage(Event):
     type: Literal["user_message"] = "user_message"
     text: str
     source: Literal["text", "voice", "correction"] = "text"
+    speaker: str | None = None
+    """Voice only: the enrolled speaker the voice matched, or None (unknown, not
+    identified, or typed). A label for later analysis, never an authorisation; the
+    prompt, history, memory and tools ignore it (ADR 0021)."""
+    speaker_score: float | None = None
+    """The best match's score, when identification ran."""
+    audio_path: str | None = None
+    """The utterance clip, relative to the workspace, while it is kept."""
+    audio_s: float | None = None
+    """Length of the utterance audio in seconds (voice only)."""
 
 
 class Interrupt(Event):

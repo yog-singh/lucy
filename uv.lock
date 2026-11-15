@@ -573,6 +573,7 @@ dependencies = [
     { name = "sounddevice" },
     { name = "soxr" },
     { name = "sqlite-vec" },
+    { name = "voice-fingerprint" },
 ]
 
 [package.dev-dependencies]
@@ -595,6 +596,7 @@ requires-dist = [
     { name = "sounddevice", specifier = ">=0.5" },
     { name = "soxr", specifier = ">=1.0" },
     { name = "sqlite-vec", specifier = ">=0.1.9" },
+    { name = "voice-fingerprint", specifier = ">=0.1.1" },
 ]
 
 [package.metadata.requires-dev]
@@ -1596,6 +1598,22 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/e3/05/b17359e1cefb4f909b5e40b1b90a496d987258916dbbf88e842c729f510e/urllib3-2.8.0.tar.gz", hash = "sha256:63bf2ead4c879426ebf22ef2a781eeb4aa3b4ae798a0435506f8687fd5bb9b63", size = 458972, upload-time = "2026-09-15T19:29:36.253Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/92/9d/c4e665119135114480843e7ab388fa94d8480650450e6f8e26b70d323a4c/urllib3-2.8.0-py3-none-any.whl", hash = "sha256:0cf3cae568d36aa9576b28dfb35f11328f1cb974ca7647d9475ebb86c75ac6e3", size = 135717, upload-time = "2026-09-15T19:29:34.577Z" },
+]
+
+[[package]]
+name = "voice-fingerprint"
+version = "0.1.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "huggingface-hub" },
+    { name = "numpy" },
+    { name = "onnxruntime" },
+    { name = "soundfile" },
+    { name = "soxr" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/b7/65/293edb5df85d44bb68a897b6a765718810d819670ac908d27c5fbf2e657a/voice_fingerprint-0.1.1.tar.gz", hash = "sha256:b6f5ed2ce55d12c29ae10ebbf2aac41deef0713c47ccc6b1be3fb099bd6b36d6", size = 33911, upload-time = "2026-09-06T18:32:04.822Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/55/ef/21daf2992b3e14229d6a25d27e062de70a83a81acd2842de7c0bdd161388/voice_fingerprint-0.1.1-py3-none-any.whl", hash = "sha256:c62ee7e70f0f6fbf2eae4016e29d6e2d3c8651d6a5ba6320931fe67906a68b80", size = 32204, upload-time = "2026-09-06T18:32:03.428Z" },
 ]
 
 [[package]]
