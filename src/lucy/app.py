@@ -117,6 +117,7 @@ from lucy.memory.sqlite_store import SQLiteMemoryStore
 from lucy.prompts import load_prompt
 from lucy.tools import build_tools
 from lucy.tools.reminders import REMINDER_TOOLS, build_store, local_announcement
+from lucy.tools.voice_enrolment import ENROL_TOOLS, ENROLMENT_TIMER, handle_enrolment
 
 logger = logging.getLogger(__name__)
 
@@ -490,6 +491,11 @@ class LucyApp:
                 )
                 timer_handlers[REMINDER_TIMER] = self._reminders.handle
             self._tools = list(self._tool_builder(self.settings))
+            for tool in self._tools:
+                if hasattr(tool, "voice_client"):  # the voice enrolment tools
+                    tool.voice_client = self._speech  # type: ignore[attr-defined]
+            if ENROL_TOOLS & {t.name for t in self._tools}:
+                timer_handlers[ENROLMENT_TIMER] = handle_enrolment
             context = ContextBuilder(
                 system_prompt(
                     [t.name for t in self._tools],

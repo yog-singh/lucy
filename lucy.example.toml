@@ -127,6 +127,10 @@ wait_ms              = 150
 # go first beyond this many MB.
 keep_utterances_days = 1
 max_utterances_mb    = 200
+# Sentences read aloud when enrolling a voice by asking Lucy ("enrol my voice";
+# tools `enroll_voice` and `replace_voice`, which must also be in [tools] enabled;
+# voice clients only). The sentences are shown on screen, not read out.
+enrol_sentences      = 5
 
 [embedder]
 # Ollama adds no prefixes (the model template is the bare prompt), so the
@@ -213,6 +217,13 @@ max_statements         = 8
 # while Lucy is running (`lucy chat` prints them; voice delivery is not built yet);
 # ones missed while she was off are delivered at the next start. To add:
 # enabled = [..., "reminders", "set_reminder", "set_timer", "cancel_reminder"]
+#
+# The voice enrolment tools let the user say "enrol my voice" or "enrol Asha's
+# voice" in `lucy voice` or `lucy listen`: Lucy shows sentences to read aloud,
+# records them and enrols the voice ([speakers] must be enabled and downloaded).
+# `enroll_voice` takes new names; `replace_voice` re-records an enrolled one and
+# asks first. To add:
+# enabled = [..., "enroll_voice", "replace_voice"]
 #
 # Tools that change or delete things ask the user first, in Lucy's voice, and
 # run only if the very next thing the user says is a plain yes ("yes", "go

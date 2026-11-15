@@ -159,7 +159,16 @@ def test_guidance_names_only_enabled_tools() -> None:
     every = system_prompt(True)
     assert "the time tool" in every and "the weather tool" in every
     web = system_prompt(
-        ["wikipedia", "web_search", "fetch_page", *CALENDAR, *REMINDERS], confirming=True
+        [
+            "wikipedia",
+            "web_search",
+            "fetch_page",
+            *CALENDAR,
+            *REMINDERS,
+            "enroll_voice",
+            "replace_voice",
+        ],
+        confirming=True,
     )
     assert "the time tool" not in web and "the weather tool" not in web
     assert GUIDANCE in web and "never work it out" not in web
@@ -171,8 +180,15 @@ def test_guidance_names_only_enabled_tools() -> None:
         ' For weather, use the weather tool with the place named or, for "here", where '
         "you know the user is, else ask."
     )
-    both = system_prompt(["wikipedia", "time", "weather", *CALENDAR, *REMINDERS], confirming=True)
+    both = system_prompt(
+        ["wikipedia", "time", "weather", *CALENDAR, *REMINDERS, "enroll_voice", "replace_voice"],
+        confirming=True,
+    )
     assert both == every
+    without_enrolment = system_prompt(["wikipedia", "time", "weather"])
+    assert "enroll_voice" not in without_enrolment and "replace_voice" not in without_enrolment
+    enrol_only = system_prompt(["enroll_voice"])
+    assert "the enroll_voice tool" in enrol_only and "replace_voice" not in enrol_only
     no_calendar = system_prompt(["wikipedia", "time", "weather"])
     assert "calendar" not in no_calendar.lower()
     reading_only = system_prompt(["calendar"])

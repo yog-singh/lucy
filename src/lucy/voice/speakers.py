@@ -95,6 +95,14 @@ class SpeakerTagger:
         self.last_identify_s: float | None = None
         self.prune()
 
+    @property
+    def identifier(self) -> SpeakerIdentifier:
+        return self._identifier
+
+    @property
+    def workspace(self) -> Workspace:
+        return self._workspace
+
     def prune(self) -> None:
         try:
             prune_clips(

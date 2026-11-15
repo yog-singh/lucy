@@ -189,6 +189,12 @@ class TerminalUI:
         self._state = state
         self._draw()
 
+    def enrol_sentence(self, number: int, count: int, sentence: str) -> None:
+        """A sentence to read aloud during a voice enrolment, shown plainly."""
+        self._clear()
+        self._write(f"\n  Sentence {number} of {count}, read aloud:\n\n    {sentence}\n\n")
+        self._draw()
+
     def user_speaker(self, text: str, speaker: str) -> None:
         self._clear()
         self._write(f"you ({speaker})> {text}\n")
@@ -346,10 +352,11 @@ async def _converse(
     interactive: bool,
 ) -> int:
     from lucy.clients.cli import memory_banner
-    from lucy.clients.speakers_cli import build_tagger
+    from lucy.clients.speakers_cli import build_enroller, build_tagger
     from lucy.voice.session import VoiceConfig, VoiceSession, deliver_reminders
 
     ui = TerminalUI(out, err, show_state=interactive)
+    tagger = build_tagger(app.settings, lambda m: print(f"lucy voice: {m}", file=err))
     session = VoiceSession(
         bus=app.bus,
         session_id=args.session,
@@ -360,7 +367,8 @@ async def _converse(
         config=VoiceConfig.from_settings(app.settings.voice),
         ui=ui,
         timings_path=timings_path(app.settings),
-        speakers=build_tagger(app.settings, lambda m: print(f"lucy voice: {m}", file=err)),
+        speakers=tagger,
+        enroller=build_enroller(app.settings, tagger),
     )
     earlier = len(await app.memory.recent_episodes(args.session, 1_000_000))
     print(f"Session {args.session!r} ({earlier} earlier events).", file=err)
@@ -487,7 +495,7 @@ async def run_listen(
     """
     from lucy.app import LucyApp
     from lucy.clients.cli import backlog_message, memory_banner
-    from lucy.clients.speakers_cli import build_tagger
+    from lucy.clients.speakers_cli import build_enroller, build_tagger
     from lucy.voice.audio import AudioDeviceError, FileAudioIO, SoundDeviceIO
     from lucy.voice.session import VoiceConfig, VoiceSession, deliver_reminders
     from lucy.voice.vad import SileroVAD
@@ -547,6 +555,7 @@ async def run_listen(
             load()
         earlier = len(await app.memory.recent_episodes(args.session, 1_000_000))
         ui.notice(f"Session {args.session!r} ({earlier} earlier events). {memory_banner(app)}")
+        tagger = build_tagger(settings, ui.notice)
         session = VoiceSession(
             bus=app.bus,
             session_id=args.session,
@@ -557,7 +566,8 @@ async def run_listen(
             config=VoiceConfig.from_settings(settings.voice),
             ui=session_ui,
             timings_path=timings_path(settings),
-            speakers=build_tagger(settings, ui.notice),
+            speakers=tagger,
+            enroller=build_enroller(settings, tagger),
         )
         if app.reminders is not None:
             reminders = asyncio.create_task(

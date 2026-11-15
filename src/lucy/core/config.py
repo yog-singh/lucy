@@ -278,6 +278,18 @@ class CancelReminderSettings(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
 
+class EnrollVoiceSettings(BaseModel):
+    """The `enroll_voice` tool (act tier). Needs `[speakers] enabled` and a voice client."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+
+class ReplaceVoiceSettings(BaseModel):
+    """The `replace_voice` tool (dangerous: asks first). Needs `[speakers] enabled`."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+
 class ToolsSettings(BaseModel):
     """Which tools the chat model may use, and each tool's options.
 
@@ -309,6 +321,8 @@ class ToolsSettings(BaseModel):
     set_reminder: SetReminderSettings = Field(default_factory=SetReminderSettings)
     set_timer: SetTimerSettings = Field(default_factory=SetTimerSettings)
     cancel_reminder: CancelReminderSettings = Field(default_factory=CancelReminderSettings)
+    enroll_voice: EnrollVoiceSettings = Field(default_factory=EnrollVoiceSettings)
+    replace_voice: ReplaceVoiceSettings = Field(default_factory=ReplaceVoiceSettings)
 
     @classmethod
     def known_tools(cls) -> list[str]:
@@ -415,6 +429,8 @@ class SpeakersSettings(BaseModel):
     """How long utterance clips are kept; 0 deletes each right after identification."""
     max_utterances_mb: float = Field(default=200.0, ge=0)
     """Size cap for kept utterance clips; the oldest go first."""
+    enrol_sentences: int = Field(default=5, ge=3, le=8)
+    """How many sentences a voice enrolment asks for (`enroll_voice`, `replace_voice`)."""
 
 
 class ContextSettings(BaseModel):

@@ -53,6 +53,19 @@ def make_identifier(settings: Settings) -> Any:
     )
 
 
+def build_enroller(settings: Settings, tagger: Any) -> Any:
+    """The voice session's `Enroller`, sharing `tagger`'s identifier; None when there
+    is no tagger or neither enrolment tool is enabled."""
+    from lucy.tools.voice_enrolment import ENROL_TOOLS
+    from lucy.voice.enrol import Enroller
+
+    if tagger is None or not ENROL_TOOLS & set(settings.tools.enabled):
+        return None
+    return Enroller(
+        tagger.identifier, tagger.workspace, sentences=settings.speakers.enrol_sentences
+    )
+
+
 def build_tagger(
     settings: Settings,
     notice: Callable[[str], None],
