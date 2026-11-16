@@ -72,6 +72,15 @@ The stack needs no PyTorch.
 
 Not measurable without a person at the machine: how each voice sounds, real microphone and room behaviour, real echo through the laptop speakers, Bluetooth headsets, and wake-word error rates on real voices.
 
+## English and Hindi: the `indic_flex` recogniser
+
+`[stt] adapter = "indic_flex"` replaces Parakeet with `bodhan-ai/indic-transcribe-flex`, which understands English, Hindi and the two mixed, and writes everything in Latin script (ADR 0023). It runs in a worker process (`src/lucy/adapters/indic_flex_worker.py`, its own PyTorch environment built by `uv run --script`; `uv` must be installed), language identification between English and Hindi, "mixed" mode, float16 on the GPU; any Devanagari left is transliterated (`lucy.voice.translit`) and a guard drops text invented from noise (quiet audio, runaway or unsure generations, a bare "REDACTED").
+
+- Setup: the model is gated. Accept its licence (Indic Open Model License) at <https://huggingface.co/bodhan-ai/indic-transcribe-flex>, log in with `hf auth login` (or set `HF_TOKEN`), and start `lucy voice` once with network access: uv builds the worker's environment and the 4.9 GB weights are downloaded. After that it works offline.
+- Measured (checks/README.md, stt_accuracy): 16.5 % word error on the user's English (Parakeet 9.7 %), 6.2 % on Hindi (romanised), about 0.35 s per utterance after an 8 s warm-up, about 2.3 GB of GPU memory. No name biasing; a short noise burst can still come out as "Thank you".
+- Options: `languages` (default `["en", "hi"]`), `mode` (`mixed`), `latin` (true), `device` (`mps` or `cpu`), `timeout` (20 s per utterance), `start_timeout` (900 s, for the first environment build), and the guard's `min_dbfs` (-55), `max_tokens_per_s` (25), `token_slack` (10), `min_mean_logprob` (-1.0), `max_repeats` (4). Dropped transcripts are logged at info level with the reason and the raw text; the worker's own output is in the debug log.
+- Switching back to Parakeet is one line: `adapter = "parakeet_mlx"`.
+
 ## Latency
 
 Estimated from the measurements, from the end of the user's speech to the first audio of the reply:

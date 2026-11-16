@@ -25,3 +25,7 @@ The chat model is not used for transcription although it accepts audio: it score
 - Voice quality has not been judged by a person. The voice is a config value.
 - All numbers come from synthetic speech and should be re-checked with a real microphone.
 - openWakeWord's current release cannot be locked by uv on Python 3.12 without restricting the lock to macOS, and its pretrained models are licensed for non-commercial use, so a custom model is needed.
+
+## Note, 2026-11-17
+
+A second STT adapter, `indic_flex`, runs `bodhan-ai/indic-transcribe-flex` for English and Hindi with Latin output (ADR 0023). PyTorch is still kept out of Lucy's own environment: that model runs in a worker process with its own pinned environment, started with `uv run --script`. Parakeet remains the default.

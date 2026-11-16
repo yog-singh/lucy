@@ -49,6 +49,16 @@ summary    = { adapter = "ollama", model = "gemma4:12b-mlx", context_window = 32
 adapter        = "parakeet_mlx"
 model          = "mlx-community/parakeet-tdt-0.6b-v2"
 cache_limit_mb = 256
+# English and Hindi, all output in Latin script (ADR 0023, docs/voice.md): replace
+# the three lines above with the block below. The model is gated: accept its licence
+# at https://huggingface.co/bodhan-ai/indic-transcribe-flex and `hf auth login` first.
+# It runs in a worker process with its own PyTorch environment (needs `uv`).
+# adapter   = "indic_flex"
+# languages = ["en", "hi"]   # one forces it; two let the model choose
+# mode      = "mixed"        # English in Latin script, numbers as digits
+# latin     = true           # write any Devanagari in Latin
+# device    = "mps"
+# timeout   = 20             # seconds per utterance
 
 [tts]
 # Speech synthesis for `lucy voice`, served by Ollama (`ollama pull phonon`).
