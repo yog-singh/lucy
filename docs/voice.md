@@ -40,6 +40,8 @@ Voice-activity detection, endpointing, audio I/O and playback are client-side si
 
 Built on 2026-11-13 ([ADR 0018](adr/0018-wake-word-listener.md)) ahead of stage 2, because it does not depend on barge-in. It uses the pretrained "hey jarvis" model; a custom "Hey Lucy" model and running at login are still to do. Verified through audio files only.
 
+The wake phrase is removed from the start of each transcript in `lucy listen`, including misheard forms: Parakeet often hears "Hey Jarvis" as "Hi Javas.", "Hey, Davis." or, further off, "Hey, Douglas." A greeting followed by a sound-alike of the name is always removed; a greeting followed by any uncommon word or two that ends the sentence only in the first transcript after a detection, since that audio holds the phrase. If nothing is left, the utterance was only the wake phrase: there is no chat turn and Lucy keeps listening for the request. The phrase is `[wake] phrase`; the log line "removed the wake phrase" keeps the original transcript. `lucy voice` has no wake phrase and does not remove anything.
+
 Due reminders (ADR 0020) are spoken in `lucy voice` and `lucy listen` as soon as Lucy is idle, never over the user or another reply. In `lucy listen` the wake chime plays first, the follow-up window opens afterwards so the user can answer without the wake phrase, and a reminder due before the first wake starts Lucy on its own (paying the model-loading delay).
 
 | | Result |

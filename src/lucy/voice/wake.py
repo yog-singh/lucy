@@ -107,15 +107,79 @@ class WakeStage:
 _WORD = re.compile(r"[\w']+")
 
 
-def strip_wake_phrase(text: str, phrase: str, *, max_lead_words: int = 2) -> str:
+_GREETINGS: Final = frozenset({"hey", "hi", "hay", "hai", "hei"})
+# After a detection the phrase is known to be in the audio: a few more greetings
+# ("Pay Javis.", "Okay, Javas"), but never a common word as the name ("Hey, what's up?").
+_WOKE_GREETINGS: Final = _GREETINGS | {"a", "pay", "he", "okay", "ok"}
+_NOT_A_NAME: Final = frozenset(
+    "what what's whats how how's can could would will do does did is are am i i'm you "
+    "there there's that this it it's the so and but well yes yeah no not please thanks "
+    "thank wait look listen let's lets good um uh oh all everyone guys man again just "
+    "who where when why which my me we tell cool fine great sure right stop sorry".split()
+)
+_SOUND_CLASSES: Final = str.maketrans("dtgbfwzcq", "jjjvvvskk")
+_NAME_RATIO: Final = 0.8  # Javis, Javas, Javus, Davis, Darvis, Tarvis pass; Dave, Joe do not
+
+
+def _sound_key(word: str) -> str:
+    """A rough sound-alike key: vowels as 'a', post-vocalic 'r' and a silent final 'e'
+    dropped (Jarvis ~ Javis), d/t/g as j, b/f/w as v, soft c and z as s, repeats collapsed."""
+    w = re.sub(r"(?<=[^aeiou])e$", "", re.sub(r"c(?=[eiy])", "s", word.lower()))
+    w = re.sub(r"(?<=[aeiouy])r", "", re.sub(r"[^a-z]", "", w))
+    w = re.sub(r"[aeiouy]+", "a", w).translate(_SOUND_CLASSES)
+    return re.sub(r"(.)\1+", r"\1", w)
+
+
+def _misheard_phrase_end(text: str, target: list[str], *, woke: bool) -> int | None:
+    """Where a misheard wake phrase at the very start of `text` ends, or None.
+
+    The first word must be a greeting (or the phrase's own first word); then either the
+    next word sounds like the phrase's name ("Hi Javas", "Hey Darvis, ..."), or, only
+    when the detector has just fired, one or two words that are not common words and end
+    the sentence ("Hey, Douglas.", "Hey Joe is").
+    """
+    words = list(_WORD.finditer(text))
+    if len(words) < 2 or len(target) < 2:
+        return None
+    greetings = (_WOKE_GREETINGS if woke else _GREETINGS) | set(target[:-1])
+    if words[0].group().lower() not in greetings:
+        return None
+    name, heard = _sound_key(target[-1]), words[1].group()
+    if difflib.SequenceMatcher(None, _sound_key(heard), name).ratio() >= _NAME_RATIO:
+        return words[1].end()
+    if not woke or heard.lower() in _NOT_A_NAME:
+        return None
+    for last in words[1:3]:
+        if not text[last.end() :].strip() or text[last.end()] in ",.?!":
+            return last.end()
+    return None
+
+
+def strip_wake_phrase(
+    text: str, phrase: str, *, max_lead_words: int = 2, woke: bool = False
+) -> str:
     """`text` without the wake phrase at (or within `max_lead_words` words of) its start.
 
     Tolerant of punctuation, case and small transcription variants ("Hey, Jarvis.",
-    "Hay Jarvis", "Jarvis"). Text without the phrase is returned unchanged.
+    "Hay Jarvis", "Jarvis", and sound-alikes such as "Hi Javas."); `woke` (the
+    detector fired just before this utterance) also accepts a misheard name that ends
+    the sentence ("Hey, Douglas."). Text without the phrase is returned unchanged; an
+    empty result means the utterance was the wake phrase alone.
     """
     target = _WORD.findall(phrase.lower())
     if not target:
         return text.strip()
+    end = _phrase_end(text, target, max_lead_words)
+    if end is None:
+        end = _misheard_phrase_end(text, target, woke=woke)
+    if end is None:
+        return text.strip()
+    rest = text[end:].lstrip(" \t\n,.;:!?-—…")
+    return rest[:1].upper() + rest[1:] if rest else ""
+
+
+def _phrase_end(text: str, target: list[str], max_lead_words: int) -> int | None:
+    """Where the (closely heard) wake phrase ends, by overall similarity, or None."""
     words = list(_WORD.finditer(text))
     joined_target = " ".join(target)
     best: tuple[float, int] | None = None  # (similarity, index of the last word matched)
@@ -137,25 +201,34 @@ def strip_wake_phrase(text: str, phrase: str, *, max_lead_words: int = 2) -> str
                 ratio = ratio if ratio >= 0.85 else 0.0
             if ratio >= 0.75 and (best is None or ratio > best[0]):
                 best = (ratio, start + size - 1)
-    if best is None:
-        return text.strip()
-    rest = text[words[best[1]].end() :].lstrip(" \t\n,.;:!?-—…")
-    return rest[:1].upper() + rest[1:] if rest else ""
+    return None if best is None else words[best[1]].end()
 
 
 class WakePhraseSTT:
-    """An STT that removes the wake phrase from the start of each transcript."""
+    """An STT that removes the wake phrase from the start of each transcript.
 
-    def __init__(self, stt: STT, phrase: str) -> None:
+    `woke` (`WakeListener.take_wake`) says whether the detector fired since the last
+    transcript; that utterance holds the pre-roll, so its match is the lenient one. An
+    empty text (the wake phrase alone) is no turn for the session.
+    """
+
+    def __init__(self, stt: STT, phrase: str, woke: Callable[[], bool] | None = None) -> None:
         self._stt = stt
         self._phrase = phrase
+        self._woke = woke
         self.capabilities = stt.capabilities
 
     async def transcribe(self, audio: AudioChunk) -> Transcript:
         transcript = await self._stt.transcribe(audio)
-        text = strip_wake_phrase(transcript.text, self._phrase)
+        woke = self._woke() if self._woke is not None else False
+        text = strip_wake_phrase(transcript.text, self._phrase, woke=woke)
         if text != transcript.text.strip():
-            logger.info("removed the wake phrase: %r -> %r", transcript.text, text)
+            logger.info(
+                "removed the wake phrase%s: %r -> %r",
+                " (just woken)" if woke else "",
+                transcript.text,
+                text,
+            )
         return transcript.model_copy(update={"text": text})
 
     async def prepare(self) -> None:
@@ -291,6 +364,7 @@ class WakeListener:
         self._chimes: set[asyncio.Task[None]] = set()
         self._roused = False
         self._proactive = False  # the session spoke on its own while we were waiting
+        self._fresh_wake = False  # detected, and no transcript taken since
         self.wakes: list[float] = []  # capture time of each detection
         self.sleeps: list[float] = []  # when each return to waiting happened
 
@@ -338,6 +412,11 @@ class WakeListener:
             await self._io.play(one())
         except Exception as exc:
             logger.warning("could not play the chime: %s", exc)
+
+    def take_wake(self) -> bool:
+        """Whether the detector fired since the last call (`WakePhraseSTT`'s `woke`)."""
+        fresh, self._fresh_wake = self._fresh_wake, False
+        return fresh
 
     def stop(self) -> None:
         self._stopping = True
@@ -427,6 +506,7 @@ class WakeListener:
 
     def _wake(self, at: float) -> None:
         self.wakes.append(at)
+        self._fresh_wake = True
         self._state = ListenerState.AWAKE
         self._deadline = at + self._config.followup_s
         if self._session is not None:
@@ -438,6 +518,7 @@ class WakeListener:
         now = self._io.now()
         logger.info("no speech for %.0fs: waiting for the wake phrase", self._config.followup_s)
         self.sleeps.append(now)
+        self._fresh_wake = False
         self._state = ListenerState.WAITING
         self._deadline = float("inf")
         self._stage.reset()

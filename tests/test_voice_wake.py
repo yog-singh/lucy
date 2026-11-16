@@ -233,6 +233,79 @@ def test_strip_another_phrase() -> None:
     assert strip_wake_phrase("Hey Lucy, good morning.", "Hey Lucy") == "Good morning."
 
 
+# Parakeet's text for clips of "Hey Jarvis" (data/stt_eval truth labels, checks/stt_accuracy
+# run flex1, and user messages that reached the chat model in `lucy listen`).
+MISHEARD_ALWAYS = [
+    ("Hey, Javis.", ""),
+    ("Hey, Davis.", ""),
+    ("Hi Javas.", ""),
+    ("Hi, Javas.", ""),
+    ("Hey Javas.", ""),
+    ("Hey Tarvis", ""),
+    ("Hey Darvis, what time is it?", "What time is it?"),
+    ("Hey Javus. And in how many minutes would um it be twelve?", "And in how many"
+     " minutes would um it be twelve?"),
+]  # fmt: skip
+MISHEARD_JUST_WOKEN = [
+    ("Hey Joe is", ""),
+    ("Hey Joe is.", ""),
+    ("Hey, Douglas.", ""),
+    ("Hey Douglas.", ""),
+    ("Pay Javis.", ""),
+    ("Hey John Was.", ""),
+]
+ORDINARY = [
+    "Hey, do I have email?",
+    "Hi, how are you?",
+    "Hey Joe called me yesterday",
+    "Hey Dad is coming",
+    "Hey, what's up?",
+    "Hey, can you check my mail?",
+    "Hi, is it raining?",
+    "Hey, good morning.",
+    "Hi there.",
+    "Hey, thanks.",
+    "Hey.",
+    "Okay.",
+    "Okay, so what's next?",
+    "What time is it?",
+    "Do I have a JavaS? Do I have anything on my calendar for today?",  # not handled
+]
+
+
+@pytest.mark.parametrize(("text", "expected"), MISHEARD_ALWAYS)
+def test_strip_a_misheard_wake_phrase(text: str, expected: str) -> None:
+    assert strip_wake_phrase(text, "hey jarvis") == expected
+    assert strip_wake_phrase(text, "hey jarvis", woke=True) == expected
+
+
+@pytest.mark.parametrize(("text", "expected"), MISHEARD_JUST_WOKEN)
+def test_strip_a_far_misheard_wake_phrase_only_just_after_a_detection(
+    text: str, expected: str
+) -> None:
+    assert strip_wake_phrase(text, "hey jarvis", woke=True) == expected
+    assert strip_wake_phrase(text, "hey jarvis") == text
+
+
+@pytest.mark.parametrize("text", ORDINARY)
+def test_ordinary_openings_are_kept(text: str) -> None:
+    assert strip_wake_phrase(text, "hey jarvis") == text
+    assert strip_wake_phrase(text, "hey jarvis", woke=True) == text
+
+
+def test_a_name_that_ends_a_clause_is_a_wake_phrase_only_just_after_a_detection() -> None:
+    text = "Hey Dave, what's the time?"
+    assert strip_wake_phrase(text, "hey jarvis") == text
+    assert strip_wake_phrase(text, "hey jarvis", woke=True) == "What's the time?"
+
+
+def test_misheard_lucy() -> None:
+    assert strip_wake_phrase("Hi, Lucie. What's on today?", "hey lucy") == "What's on today?"
+    assert strip_wake_phrase("Hi, how are you?", "hey lucy") == "Hi, how are you?"
+    assert strip_wake_phrase("Hey, Lucas.", "hey lucy", woke=True) == ""
+    assert strip_wake_phrase("Hi Javas.", "hey lucy") == "Hi Javas."
+
+
 def test_chimes_are_short_and_quiet() -> None:
     sound = chime((660.0, 990.0))
     assert sound.sample_rate == OUTPUT_SAMPLE_RATE
@@ -380,6 +453,24 @@ async def test_wake_phrase_alone_then_the_request(tmp_path: Path) -> None:
     assert code == 0
     assert len(s.stt.calls) == 2
     assert await s.users() == ["what time is it"]
+
+
+async def test_a_misheard_wake_phrase_alone_is_no_turn(tmp_path: Path) -> None:
+    s = ListenSetup(tmp_path, ["Noon."], ["Hey, Douglas.", "what time is it"])
+    code = await s.run(silence(0.5), wake_phrase(), silence(2.0), speech(1.0), silence(2.0))
+    assert code == 0
+    assert len(s.stt.calls) == 2
+    assert await s.users() == ["what time is it"]
+    assert len(s.llm.calls) == 1
+
+
+async def test_the_lenient_match_is_only_for_the_utterance_after_a_wake(tmp_path: Path) -> None:
+    s = ListenSetup(
+        tmp_path, ["Lisbon.", "Hello."], ["Hey Joe is, capital of portugal", "Hey Joe is"],
+        followup_seconds=4,
+    )  # fmt: skip
+    await s.run(silence(0.5), wake_phrase(), speech(1.0), silence(2.0), speech(1.0), silence(2.0))
+    assert await s.users() == ["Capital of portugal", "Hey Joe is"]
 
 
 async def test_wake_phrase_alone_times_out_back_to_waiting(tmp_path: Path) -> None:

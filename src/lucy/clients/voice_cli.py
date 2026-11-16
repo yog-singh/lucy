@@ -561,7 +561,7 @@ async def run_listen(
             session_id=args.session,
             io=session_io,
             vad=vad,
-            stt=WakePhraseSTT(app.stt, wake.phrase),
+            stt=WakePhraseSTT(app.stt, wake.phrase, woke=listener.take_wake),
             tts=app.tts,
             config=VoiceConfig.from_settings(settings.voice),
             ui=session_ui,
