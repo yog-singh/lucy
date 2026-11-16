@@ -1,0 +1,19 @@
+# Words and phrases boosted by the parakeet_boost configuration, one per line.
+# Matching is case-sensitive on what the model writes, so write names capitalised.
+Lucy
+Yogesh
+Nifty
+Nifty fifty
+Sensex
+Cult
+Accel
+Anthropic
+Dario Amodei
+Event Horizon Telescope
+Hubble
+geopolitical
+enrol
+Jarvis
+Hey Jarvis
+Daniela Amodei
+Burn
