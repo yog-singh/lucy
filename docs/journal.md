@@ -2,6 +2,12 @@
 
 Dated notes on what was built, what failed and what changed. Newest first.
 
+## 2026-11-17: English and Hindi speech recognition
+
+- Decided by the user: Lucy's speech recognition becomes `bodhan-ai/indic-transcribe-flex` for English and Hindi, all output in Latin script, in the measured configuration `flex_enhi_mixed_latin` (ADR 0023). Built by a sub-agent as a second STT adapter, `indic_flex`; Parakeet stays the default until `lucy.toml` is switched. Not yet committed.
+- The model runs in a worker process with its own pinned PyTorch environment (`uv run --script`), so Lucy's dependencies are unchanged. The transliterator and the junk guard moved from `checks/stt_accuracy` into Lucy (`lucy.voice.translit`, `lucy.adapters.stt_indic_flex_guard`); the check imports them. The guard now also drops a bare "REDACTED".
+- Real run through the adapter (`flex_adapter` in the check): 16.5 % WER on the user's 73 English clips and 6.2 % (romanised, folded) on the 150 Hindi clips, as measured before; all four silence and noise clips now come out empty. About 8 s warm-up, then 0.3 s for the first utterance and 0.38 s mean per utterance; no worker process left after closing.
+
 ## 2026-11-16: misheard wake phrase
 
 - In `lucy listen` Parakeet often mishears the wake phrase in the pre-roll ("Hi Javas.", "Hey, Douglas.", "Hey Joe is"), and 6 of them reached the chat model as user messages on their own. `strip_wake_phrase` now also matches a greeting followed by a sound-alike of the name, and, for the first utterance after a detection only, a greeting followed by one or two uncommon words that end the sentence; a transcript left empty is no turn (ADR 0018 note). Tested with fakes and the real transcripts; not yet committed.

@@ -126,6 +126,7 @@ BUILTIN_ADAPTER_MODULES: Final = (
     "lucy.adapters.embed_openai_compat",
     "lucy.memory.sqlite_store",
     "lucy.adapters.stt_parakeet_mlx",  # imports MLX only when a model is loaded
+    "lucy.adapters.stt_indic_flex",  # its model runs in a worker process (ADR 0023)
     "lucy.adapters.tts_openai_compat",
 )
 """Modules imported at startup so their adapters register themselves."""

@@ -70,6 +70,7 @@ What stage 1 does: Lucy listens; when you stop speaking (0.6 s of silence) your 
 Setup:
 
 - Speech recognition is Parakeet TDT 0.6B v2, run in-process with MLX (Apple silicon). Its weights (2.5 GB) are downloaded from Hugging Face into `~/.cache/huggingface/hub` the first time `lucy voice` starts; after that no network is used.
+- For English and Hindi (all output in Latin script) set `adapter = "indic_flex"` under `[stt]`: it runs `bodhan-ai/indic-transcribe-flex` (gated: accept its licence on Hugging Face first) in a worker process with its own PyTorch environment; less accurate on English than Parakeet and slower (docs/voice.md, ADR 0023).
 - Speech synthesis is `phonon` served by Ollama: `ollama pull phonon` (the Apache-2.0 build; `phonon:40m-en` is for non-commercial use only). `voice` under `[tts]` picks one of its voices; `default` is a good start.
 - Voice-activity detection is Silero VAD, shipped with Lucy.
 - `[stt]` and `[tts]` must be set as in `lucy.example.toml`; the optional `[voice]` section tunes listening (silence before Lucy answers, the ignored tail after she speaks, devices).
