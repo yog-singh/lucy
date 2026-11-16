@@ -2,6 +2,10 @@
 
 Dated notes on what was built, what failed and what changed. Newest first.
 
+## 2026-11-16: misheard wake phrase
+
+- In `lucy listen` Parakeet often mishears the wake phrase in the pre-roll ("Hi Javas.", "Hey, Douglas.", "Hey Joe is"), and 6 of them reached the chat model as user messages on their own. `strip_wake_phrase` now also matches a greeting followed by a sound-alike of the name, and, for the first utterance after a detection only, a greeting followed by one or two uncommon words that end the sentence; a transcript left empty is no turn (ADR 0018 note). Tested with fakes and the real transcripts; not yet committed.
+
 ## 2026-11-15: private-data guard
 
 - Results from a `private = true` MCP server now mark the conversation for as long as the model can see them; a call that sends data out (web search, page fetch, Wikipedia, weather, another server) is then asked about first, naming the source and what would be sent where (ADR 0022, run 6). Same-server READ tools and local tools are not asked. Built by a sub-agent; tested with fakes only; not yet committed.
