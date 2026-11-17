@@ -135,8 +135,12 @@ class ContextBuilder:
         count_tokens: Callable[[str], int] = estimate_tokens,
         clock: Callable[[], datetime] | None = None,
         layout: ContextLayout = "stable_prefix",
+        history_tokens: int | None = None,
     ) -> None:
-        """`clock` returns the current local time (timezone-aware, so the line names
+        """`history_tokens` caps the history before the latest user message (see
+        `_history`), apart from the window's share.
+
+        `clock` returns the current local time (timezone-aware, so the line names
         the zone); with it, every build adds `date_line` (counted with the persona):
         after the persona in the `"system"` layout, in the per-turn block in the
         `"stable_prefix"` layout."""
@@ -145,10 +149,16 @@ class ContextBuilder:
         self._count = count_tokens
         self._clock = clock
         self._layout: ContextLayout = layout
+        self._history_tokens = history_tokens
 
     @property
     def layout(self) -> ContextLayout:
         return self._layout
+
+    @property
+    def persona(self) -> str:
+        """The fixed system prompt, without the date line."""
+        return self._persona
 
     def _date(self) -> str:
         return "" if self._clock is None else date_line(self._clock())
@@ -316,11 +326,17 @@ class ContextBuilder:
         first_kept = user_indexes[-1] if user_indexes else len(groups)
         # The latest user message and everything after it are always kept.
         used = sum(self._message_tokens(m) for g in groups[first_kept:] for m in g)
+        # The cap counts only what comes before the latest user message, so the
+        # residency pre-fill (built with an empty placeholder message) keeps the
+        # same earlier messages as the turn that follows it.
+        earlier = 0
+        cap = self._history_tokens
         for i in range(first_kept - 1, -1, -1):
             cost = sum(self._message_tokens(m) for m in groups[i])
-            if used + cost > budget:
+            if used + cost > budget or (cap is not None and earlier + cost > cap):
                 break
             used += cost
+            earlier += cost
             first_kept = i
         kept = [m for g in groups[first_kept:] for m in g]
         dropped = orphans + sum(len(g) for g in groups[:first_kept])

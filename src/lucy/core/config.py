@@ -305,6 +305,10 @@ class ReplaceVoiceSettings(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
 
+_TOOLS_OPTIONS: Final = ("enabled", "confirm_timeout", "dynamic", "core", "keep_turns")
+"""`[tools]` keys that are not tool names."""
+
+
 class ToolsSettings(BaseModel):
     """Which tools the chat model may use, and each tool's options.
 
@@ -319,6 +323,16 @@ class ToolsSettings(BaseModel):
     confirm_timeout: float = Field(default=60.0, gt=0, le=3600)
     """Seconds the user has to answer when a tool asks before changing or deleting
     something (ADR 0006); a later answer runs nothing."""
+    dynamic: bool = True
+    """Offer the core tools on every turn and the other groups (calendar, reminders,
+    an MCP server, ...) only while the conversation needs them (ADR 0025). False
+    offers every enabled tool on every turn."""
+    core: list[str] | None = None
+    """With `dynamic`: the tools always offered, by name (built-in or MCP). Default:
+    the web lookups, time and weather, whichever are enabled."""
+    keep_turns: int = Field(default=6, ge=1, le=50)
+    """With `dynamic`: a group stays offered for this many user turns after it was
+    last used or mentioned."""
     wikipedia: WikipediaSettings = Field(default_factory=WikipediaSettings)
     web_search: WebSearchSettings = Field(default_factory=WebSearchSettings)
     fetch_page: FetchPageSettings = Field(default_factory=FetchPageSettings)
@@ -342,7 +356,7 @@ class ToolsSettings(BaseModel):
     @classmethod
     def known_tools(cls) -> list[str]:
         """The tool names `enabled` accepts."""
-        return [name for name in cls.model_fields if name not in ("enabled", "confirm_timeout")]
+        return [name for name in cls.model_fields if name not in _TOOLS_OPTIONS]
 
     @model_validator(mode="after")
     def _check_enabled(self) -> Self:
@@ -356,6 +370,15 @@ class ToolsSettings(BaseModel):
         duplicates = sorted({name for name in self.enabled if self.enabled.count(name) > 1})
         if duplicates:
             raise ValueError(f"[tools] enabled lists {', '.join(map(repr, duplicates))} twice")
+        core = self.core or []
+        twice = sorted({name for name in core if core.count(name) > 1})
+        if twice:
+            raise ValueError(f"[tools] core lists {', '.join(map(repr, twice))} twice")
+        off = [n for n in core if n in known and n not in self.enabled]
+        if off:
+            raise ValueError(
+                f"[tools] core lists {', '.join(map(repr, off))}, not in [tools] enabled"
+            )
         if "web_search" in self.enabled and not self.web_search.searxng_url:
             raise ValueError(
                 "web_search is enabled but [tools.web_search] has no searxng_url "
@@ -567,6 +590,14 @@ class McpServerSettings(BaseModel):
     """Local only: names of Lucy's own environment variables passed on unchanged."""
     tools: dict[str, McpToolSettings] = Field(default_factory=dict)
     """The server's tools Lucy may offer, by the server's tool name."""
+    group: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]{0,31}$")
+    """The tool group its tools belong to with `[tools] dynamic` (ADR 0025); default
+    the server's name."""
+    group_description: str | None = Field(default=None, min_length=1, max_length=200)
+    """One line telling the model what the group is for; default "tools of NAME"."""
+    group_keywords: list[str] = Field(default_factory=list)
+    """Words or phrases in the user's message that offer the group; default the
+    group's name and the distinctive parts of its tool names."""
 
     @model_validator(mode="after")
     def _check_transport(self) -> Self:
@@ -773,6 +804,15 @@ class ContextSettings(BaseModel):
     history. `"stable_prefix"`: only what rarely changes before the history, and the
     date and memories with the latest user message, so each turn's prompt extends
     the previous one and the model server can reuse its cache."""
+
+    history_tokens: int | None = Field(default=1200, ge=0)
+    """Most estimated tokens (characters / 4) of conversation before the latest user
+    message that a prompt carries, whatever the chat model's `context_window`;
+    None leaves only the window's share. Older messages are dropped whole (a tool
+    call with its results). Every token of the prompt's prefix is processed again
+    when the residency policy re-warms the model (about 850 tokens/s with
+    gemma4:12b-mlx), so this bounds that cost. Measured 2026-11-17: without it the
+    200-event window carried about 4,900 tokens of history."""
 
 
 class ResidencySettings(BaseModel):

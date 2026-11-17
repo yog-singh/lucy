@@ -224,10 +224,15 @@ async def test_turn_calls_approved_mcp_tools_on_the_fixture(tmp_path: Path) -> N
         events = await run_turn(app, "Delete thing seven.")
         question = [e for e in events if type(e).__name__ == "ConfirmationRequested"]
         assert question, [type(e).__name__ for e in events]
-    assert [spec.name for spec in llm.tools_seen[0]] == ["fx_echo", "fx_delete_thing"]
+    # `[tools] dynamic` (ADR 0025): the server is one group, switched on by "echo" in
+    # the message; its guidance rides on its first tool instead of the system prompt.
+    specs = llm.tools_seen[0]
+    assert [spec.name for spec in specs] == ["more_tools", "fx_echo", "fx_delete_thing"]
+    assert "Use the fx_echo tool to echo." in specs[1].description
     prompt = llm.calls[0][0].content
-    assert "Use the fx_echo tool to echo." in prompt
+    assert "fx_echo" not in prompt
     assert "fx_pid" not in prompt  # configured but not approved: no guidance
+    assert "fx_pid" not in " ".join(s.description for s in specs)
 
 
 async def test_dangerous_mcp_tool_runs_once_on_yes_and_not_on_no(tmp_path: Path) -> None:

@@ -45,6 +45,7 @@ from lucy.core.ports import ConfirmableTool, MemoryStore, Tool, TraceSink, tool_
 from lucy.core.privacy import guard_question, guarded, needs_guard, visible_private_sources
 from lucy.core.reminders import TimerHandler
 from lucy.core.sentences import SentenceSplitter
+from lucy.core.toolsets import ToolSelector
 from lucy.core.trace import StepTrace, TurnTrace
 from lucy.core.types import (
     FinishReason,
@@ -55,6 +56,7 @@ from lucy.core.types import (
     ToolCall,
     ToolOutput,
     ToolResult,
+    ToolSpec,
 )
 
 logger = logging.getLogger(__name__)
@@ -169,6 +171,11 @@ class Orchestrator:
     name, or a handler with nothing to say, ends the turn silently. A
     confirmation request still unanswered when such a turn runs is ended
     (`ConfirmationResolved`, superseded) and the user is told so.
+
+    With a `selector` (ADR 0025), each step is offered the core tools, the
+    `more_tools` meta tool and the groups that are on (`ToolSelector.groups_on`,
+    from the log, plus groups asked for or used earlier in the turn); any
+    configured tool still runs when called. Without one, every tool every step.
     """
 
     def __init__(
@@ -185,6 +192,7 @@ class Orchestrator:
         history_limit: int = 200,
         confirm_timeout: float = 60.0,
         timer_handlers: Mapping[str, TimerHandler] | None = None,
+        selector: ToolSelector | None = None,
     ) -> None:
         if max_steps < 1:
             raise ValueError("max_steps must be at least 1")
@@ -202,6 +210,13 @@ class Orchestrator:
                 raise ValueError(f"dangerous tool {tool.name!r} has no preview to confirm with")
             self._tools[tool.name] = tool
         self._tool_specs = [tool_spec(tool) for tool in tools]
+        # Dynamic tool loading (ADR 0025): None offers every tool on every step.
+        self._selector = selector if selector is not None and selector.active else None
+        if self._selector is not None:
+            meta = self._selector.meta
+            if meta.name in self._tools:
+                raise ValueError(f"duplicate tool name {meta.name!r}")
+            self._tools[meta.name] = meta
         self._trace = trace
         self._chat_role = chat_role
         self._max_steps = max_steps
@@ -255,8 +270,15 @@ class Orchestrator:
         return PromptPrefix(
             role=self._chat_role,
             messages=self._context.prefix_messages(built),
-            tools=list(self._tool_specs),
+            tools=self._offered([*episodes, placeholder][-self._history_limit :]),
         )
+
+    def _offered(self, episodes: Sequence[AnyEvent], extra: Sequence[str] = ()) -> list[ToolSpec]:
+        """The specifications offered for a turn whose events are `episodes` (the
+        user message last), plus groups `extra` switched on during the turn."""
+        if self._selector is None:
+            return list(self._tool_specs)
+        return self._selector.specs(self._selector.groups_on(episodes) | set(extra))
 
     # --- Scheduling -----------------------------------------------------------
 
@@ -341,9 +363,14 @@ class Orchestrator:
         built = self._context.build(memory=memory, history=history, context_window=window)
         turn.context = built.report
         messages = [*built.messages, *answered]
+        switched_on: set[str] = set()
+        if self._selector is not None and answered:
+            # A confirmed call's group is offered, as it would be had it been logged earlier.
+            switched_on = self._selector.from_calls(answered[0].tool_calls)
+        specs = self._offered(episodes, sorted(switched_on))
 
         for step_number in range(1, self._max_steps + 1):
-            text, calls = await self._run_step(turn, messages)
+            text, calls = await self._run_step(turn, messages, specs)
             if not calls:
                 await self._emit(TurnEnded(**self._ids(turn), reason="completed"))
                 return "completed", None
@@ -352,6 +379,12 @@ class Orchestrator:
                 # rebuilding history drops them as unanswered.
                 break
             messages.append(Message(role=Role.ASSISTANT, content=text, tool_calls=calls))
+            if self._selector is not None:
+                # A group asked for, or used, is offered from the next step on.
+                new = self._selector.from_calls(calls) - switched_on
+                if new:
+                    switched_on |= new
+                    specs = self._offered(episodes, sorted(switched_on))
             question: str | None = None
             waiting_for = ""
             for call in calls:
@@ -411,14 +444,16 @@ class Orchestrator:
         await self._emit(TurnEnded(**self._ids(turn), reason="completed"))
         return "completed", None
 
-    async def _run_step(self, turn: _Turn, messages: list[Message]) -> tuple[str, list[ToolCall]]:
+    async def _run_step(
+        self, turn: _Turn, messages: list[Message], specs: Sequence[ToolSpec]
+    ) -> tuple[str, list[ToolCall]]:
         """Stream one LLM step, publishing text as it arrives; commit its AssistantMessage."""
-        step = _Step(messages=list(messages), tools=[spec.name for spec in self._tool_specs])
+        step = _Step(messages=list(messages), tools=[spec.name for spec in specs])
         turn.step = step
         splitter = SentenceSplitter()
         calls: list[ToolCall] = []
         stream = self._gateway.stream(
-            self._chat_role, step.messages, self._tool_specs, priority=Priority.FOREGROUND
+            self._chat_role, step.messages, list(specs), priority=Priority.FOREGROUND
         )
         async with aclosing(stream) as chunks:
             async for chunk in chunks:

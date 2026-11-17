@@ -3,8 +3,9 @@
 # passed to that adapter's constructor.
 
 [llm.roles]
-# `context_window` is Lucy's own prompt budget (kept small for latency); it is
-# not sent to the server. `extra` is merged into every request: thinking is off
+# `context_window` is the window Lucy budgets the prompt's sections from; it is
+# not sent to the server (the history is also capped by [context]
+# history_tokens, which is what keeps prompts short). `extra` is merged into every request: thinking is off
 # (`reasoning_effort = "none"`), which cuts time to first token from seconds
 # to a fraction of a second.
 # All three roles use the same model, so only one is loaded. Extraction with
@@ -241,6 +242,17 @@ max_statements         = 8
 # (default 60); a later answer runs nothing.
 # confirm_timeout = 60
 #
+# Dynamic tool loading (ADR 0025): the core tools (default: wikipedia,
+# web_search, fetch_page, time, weather, whichever are enabled) and a
+# `more_tools` tool are offered on every turn; the other groups (calendar,
+# reminders, voice, each MCP server) only once a message mentions them or the
+# model asks for one, and for `keep_turns` user turns after their last use. This
+# keeps the prompt short for the re-warm (ADR 0017). false offers every tool on
+# every turn.
+# dynamic = true
+# core = ["wikipedia", "web_search", "fetch_page", "time", "weather"]
+# keep_turns = 6
+#
 # Every internet tool also takes `max_chars` (longest result given to the
 # model, default 6000) and `timeout` (seconds per call, default 10).
 
@@ -318,6 +330,9 @@ permission_timeout = 60
 # timeout = 30               # seconds one call may take
 # max_result_chars = 6000    # longest result given to the model
 # private = false            # true for servers holding private data (mail, files)
+# group = "email"            # its tool group with [tools] dynamic (default: the server name)
+# group_description = "the user's email: searching and reading messages"
+# group_keywords = ["email", "mail", "inbox"]   # default: the group and tool names
 #   While a result from a private server is in the conversation, Lucy asks before any
 #   call that sends data out (web search, page fetch, Wikipedia, weather, other
 #   servers, this server's non-read tools), saying what would be sent where.
@@ -359,6 +374,12 @@ permission_timeout = 60
 # message before the conversation; the server reprocesses the whole
 # conversation on every turn. Kept so a change can be reverted here.
 layout = "stable_prefix"
+# Most estimated tokens (characters / 4) of conversation before the latest
+# message that a prompt carries, whatever `context_window` says; older messages
+# are dropped whole. Each token is processed again when the residency policy
+# re-warms the model (about 850 tokens/s): 130 messages of history were 4,857
+# real tokens, about 6 s. 1,200 keeps about 60 messages.
+history_tokens = 1200
 
 [residency]
 # Optional; these are the defaults. Keeps the chat model's memory on the model

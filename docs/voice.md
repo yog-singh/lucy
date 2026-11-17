@@ -157,6 +157,9 @@ The MLX runner's cache limit is a compile-time constant in Ollama (8 GiB of cach
 
 Unloading the model (`keep_alive: 0`, honoured on the OpenAI-compatible endpoint too) frees it in 0.3 s; a reload takes about 1 s and comes back at 7.75 GB. The policy that works: when Lucy has been idle for about a second after background work, unload, reload at once, and pre-fill the next turn's prompt prefix with two one-token requests. It requires the `stable_prefix` prompt layout, because in the default layout the date and memories change the system message on every turn and nothing can be pre-filled.
 
+Note 2026-11-17: the prompt had grown to 10,443 tokens (history 4,857 from the 200-event window, 18 tool specifications 3,522, system prompt 2,008), so the re-warm took about 16 s and turns waited 10 to 19 s for the first token. `[context] history_tokens` (default 1,200 estimated tokens) now caps the earlier conversation; with it the prompt is 6,847 tokens and the re-warm about 9 s (see the note in ADR 0017).
+
+
 | Ten-turn voice run | End of speech to first audio (median) | STT median / max | Model memory, peak / median | Swap |
 |---|---|---|---|---|
 | No policy, default layout | 1.62 s | 0.09 / 0.48 s | 16.8 / 14.3 GB | 8.4 to 11.5 GB |

@@ -32,3 +32,12 @@ Keep `gemma4:12b-mlx` and bound its memory from Lucy's side.
 - Unloading frees the model for every client of the Ollama server, so another program using the same model at that moment has to wait for it to reload.
 - Background memory work loses its cache at each unload and reprocesses its prompts; this is not visible to the user.
 - The mechanism depends on details of one runner's cache. It can be switched off with `[residency] enabled = false`, and should be revisited if Ollama makes the cache limit configurable.
+
+## Note 2026-11-17: the prompt outgrew the re-warm
+
+Voice turns waited 10 to 19 s for the first token. The prompt had grown to 10,443 tokens (counted by Ollama for gemma4:12b-mlx): system prompt 2,008, 18 tool specifications 3,522 (5 when this was decided), 130 history messages 4,857, date line 35. History was bounded only by the 200-event window: the history section's budget is a share of the chat role's `context_window` (32768), about 14,700 estimated tokens, so it never applied. Re-warming took 1.4 s to load plus 14.5 s to pre-fill, longer than the gap before the next utterance, and a turn without the pre-fill waited 12.4 s. `[context] history_tokens` (default 1,200 estimated tokens, before the latest user message so the pre-fill and the turn keep the same messages) now caps it, and startup warns when the estimated prefix exceeds 4,500 tokens. With the cap and `fixed` defaults for the two Gmail read tools: 6,847 tokens, re-warm 0.9 + 7.9 s, first token 0.62 s after a re-warm and 8.5 s without one. Still above the 3,100 to 3,700 assumed here, because of the tool specifications and the system prompt.
+
+## Note 2026-11-17: offering fewer tools
+
+Dynamic tool loading (ADR 0025) offers the core tools (lookups, time, weather) and a `more_tools` meta tool on every turn and the other groups only while the conversation uses them. Tool specifications sit after the system text and before the history (measured from `cached_tokens`), so the offered set is derived from the episode log and `next_turn_prefix` uses the set the next turn will be offered; groups drop only at that pre-fill. With the user's configuration the prompt is 3,935 tokens with the core set (7,188 before), 4,741 with email on and 5,485 with the calendar on. The startup warning estimates the prefix from the core set.
+
