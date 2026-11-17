@@ -368,6 +368,7 @@ async def _converse(
 ) -> int:
     from lucy.clients.cli import memory_banner
     from lucy.clients.speakers_cli import build_enroller, build_tagger
+    from lucy.vision.glance import build_glancer
     from lucy.voice.session import VoiceConfig, VoiceSession, deliver_reminders
 
     ui = TerminalUI(out, err, show_state=interactive, latin=app.settings.display.latin)
@@ -384,6 +385,9 @@ async def _converse(
         timings_path=timings_path(app.settings),
         speakers=tagger,
         enroller=build_enroller(app.settings, tagger),
+        glancer=build_glancer(
+            app.settings, app.vision, lambda m: print(f"lucy voice: {m}", file=err)
+        ),
     )
     earlier = len(await app.memory.recent_episodes(args.session, 1_000_000))
     print(f"Session {args.session!r} ({earlier} earlier events).", file=err)
@@ -511,6 +515,7 @@ async def run_listen(
     from lucy.app import LucyApp
     from lucy.clients.cli import backlog_message, memory_banner
     from lucy.clients.speakers_cli import build_enroller, build_tagger
+    from lucy.vision.glance import build_glancer
     from lucy.voice.audio import AudioDeviceError, FileAudioIO, SoundDeviceIO
     from lucy.voice.session import VoiceConfig, VoiceSession, deliver_reminders
     from lucy.voice.vad import SileroVAD
@@ -583,6 +588,7 @@ async def run_listen(
             timings_path=timings_path(settings),
             speakers=tagger,
             enroller=build_enroller(settings, tagger),
+            glancer=build_glancer(settings, app.vision, ui.notice),
         )
         if app.reminders is not None:
             reminders = asyncio.create_task(

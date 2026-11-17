@@ -41,6 +41,12 @@ chat       = { adapter = "ollama", model = "gemma4:12b-mlx", context_window = 32
 chat_deep  = { adapter = "ollama", model = "gemma4:12b-mlx", context_window = 32768, extra = { reasoning_effort = "low", max_tokens = 4096 } }
 extraction = { adapter = "ollama", model = "gemma4:12b-mlx", context_window = 32768, temperature = 0, extra = { reasoning_effort = "none", max_tokens = 2048 } }
 summary    = { adapter = "ollama", model = "gemma4:12b-mlx", context_window = 32768, extra = { reasoning_effort = "none", max_tokens = 1024 } }
+# Optional: a model that can see, for the `look` tool and [vision] below (ADR 0026).
+# lfm3-vl (1.7 GB) has thinking on by default, so it is switched off here; its
+# answers are two or three sentences, which `max_tokens` bounds. It is a second
+# model on the server: with [residency] on, it is unloaded with the chat model
+# once Lucy is idle after a look, and the chat model is re-warmed as usual.
+# vision     = { adapter = "ollama", model = "lfm3-vl", context_window = 8192, extra = { reasoning_effort = "none", max_tokens = 300 } }
 
 [stt]
 # Speech recognition for `lucy voice` (only loaded by it). Parakeet runs in
@@ -249,6 +255,11 @@ max_statements         = 8
 # asks first. To add:
 # enabled = [..., "enroll_voice", "replace_voice"]
 #
+# The `look` tool lets Lucy look through the Mac's camera when asked ("what am I
+# holding?", "kya hai ye?"): one photo, described by the `vision` model role and
+# never stored. It needs [vision] enabled below. To add:
+# enabled = [..., "look"]
+#
 # Tools that change or delete things ask the user first, in Lucy's voice, and
 # run only if the very next thing the user says is a plain yes ("yes", "go
 # ahead"; not "ok"). `confirm_timeout` is how many seconds that answer may take
@@ -308,6 +319,48 @@ calendars = []
 # app's default. e.g. default_calendar = "Home"
 # Seconds to wait for you to answer macOS's permission dialog.
 permission_timeout = 60
+
+# [vision]
+# Optional, off by default. Lucy looks through a camera when asked (the `look`
+# tool, which must also be in [tools] enabled; ADR 0026). Needs OpenCV:
+# `uv sync --extra vision`. The camera is opened for one photo and released at
+# once; the photo stays in memory for that one request and is never written to
+# disk or to the conversation log. The first look makes macOS ask whether the
+# terminal Lucy runs in may use the camera; if it was refused, allow it in
+# System Settings > Privacy & Security > Camera, then restart the terminal.
+# enabled = true
+# role    = "vision"   # the [llm.roles] role of the model that sees
+# timeout = 60         # seconds for one look, photo and answer together
+# `device`: camera index (0 is the built-in camera); `max_side`: the photo's
+# longer side in pixels; `warmup_frames`: frames read and dropped first so the
+# exposure settles; `jpeg_quality`: 1 to 100.
+# camera  = { adapter = "opencv", device = 0, max_side = 1024, warmup_frames = 5, jpeg_quality = 85 }
+# Stage 3, off by default: in `lucy voice` and `lucy listen` (never `lucy chat`),
+# glance through the camera as you finish speaking, so Lucy knows who is in view
+# without being asked. It opens the camera on every voice turn (its light blinks)
+# and needs [vision.faces] below with its models. Nothing but the names and a
+# count of unrecognised faces is kept. A turn waits at most `glance_wait_ms` after
+# the transcript is ready and otherwise goes on without it (not yet measured with
+# a real camera); `glance_warmup_frames` is fewer than `warmup_frames` for speed.
+# glance               = true
+# glance_wait_ms       = 400
+# glance_warmup_frames = 2
+
+# [vision.faces]
+# Optional, off by default (stage 2 of ADR 0026). Recognises enrolled people by
+# face, so a look starts with "People in view: Asha (left), ...". Enrol by asking
+# Lucy ("remember my face": the enroll_face and replace_face tools, which must be
+# in [tools] enabled); `lucy vision list` and `lucy vision forget NAME` manage the
+# enrolled faces, stored as embeddings only (no photos) in the workspace's faces/.
+# Fetch the models first with `lucy vision download`; they are never downloaded
+# at run time. InsightFace's pretrained models are licensed for non-commercial
+# research use only. A face match is a tag, never an authorisation: a photo of
+# a person matches like the person, so nothing is ever allowed on a face match.
+# The models run in a worker process with its own environment (needs `uv`).
+# enabled   = true
+# pack      = "buffalo_l"  # or "buffalo_s": smaller and faster, a little less accurate
+# threshold = 0.40         # cosine similarity for a match; uncalibrated
+# options   = { provider = "coreml" }  # or "cpu"
 
 # [mcp]
 # Optional. MCP servers whose tools Lucy may use (docs/adr/0022-mcp-client.md).

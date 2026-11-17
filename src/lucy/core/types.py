@@ -62,17 +62,31 @@ class ToolSpec(_Frozen):
     parameters: dict[str, Any] = Field(default_factory=lambda: {"type": "object", "properties": {}})
 
 
+class Image(_Frozen):
+    """A still image for a model that can see (ADR 0026): encoded bytes and their type."""
+
+    model_config = ConfigDict(
+        frozen=True, extra="forbid", ser_json_bytes="base64", val_json_bytes="base64"
+    )
+
+    data: bytes = Field(repr=False)
+    media_type: str = "image/jpeg"
+
+
 class Message(_Frozen):
     """One message in the core's single conversation format.
 
     An assistant message may carry `tool_calls`; a tool message carries the
-    `tool_call_id` it answers.
+    `tool_call_id` it answers. A user message may carry `images` for a model that
+    can see (ADR 0026); they are left out when a message is serialised (traces,
+    logs), so a frame never reaches storage.
     """
 
     role: Role
     content: str = ""
     tool_calls: list[ToolCall] | None = None
     tool_call_id: str | None = None
+    images: tuple[Image, ...] = Field(default=(), exclude=True, repr=False)
 
 
 class Risk(StrEnum):

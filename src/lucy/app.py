@@ -82,7 +82,9 @@ from lucy.core.orchestrator import Orchestrator
 from lucy.core.ports import (
     STT,
     TTS,
+    Camera,
     Embedder,
+    FaceRecognizer,
     MemoryStore,
     Tool,
     ToolProvider,
@@ -95,6 +97,7 @@ from lucy.core.residency import Residency
 from lucy.core.toolsets import META_TOOL, ToolGroup, ToolSelector, keyword_words
 from lucy.core.trace import TurnTrace
 from lucy.core.types import MemoryContext, Risk, ToolSpec, TTSCaps
+from lucy.core.workspace import Workspace
 from lucy.memory.decay import DecayPolicy
 from lucy.memory.extraction import (
     DEFAULT_TRANSIENT_ERRORS,
@@ -127,8 +130,11 @@ from lucy.memory.sqlite_reminders import SQLiteReminderStore
 from lucy.memory.sqlite_store import SQLiteMemoryStore
 from lucy.prompts import load_prompt
 from lucy.tools import DEFAULT_CORE, GROUPS, build_tools
+from lucy.tools.face_enrolment import VISION_TOOLS
 from lucy.tools.reminders import REMINDER_TOOLS, build_store, local_announcement
 from lucy.tools.voice_enrolment import ENROL_TOOLS, ENROLMENT_TIMER, handle_enrolment
+from lucy.vision.faces import FaceBook
+from lucy.vision.service import FaceRules, VisionService
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +146,8 @@ BUILTIN_ADAPTER_MODULES: Final = (
     "lucy.adapters.stt_indic_flex",  # its model runs in a worker process (ADR 0023)
     "lucy.adapters.tts_openai_compat",
     "lucy.adapters.tts_magpie",  # its model runs in a worker process (ADR 0024)
+    "lucy.adapters.camera_opencv",  # imports OpenCV only when a frame is taken (ADR 0026)
+    "lucy.adapters.faces_insightface",  # its worker starts on the first look with faces
 )
 """Modules imported at startup so their adapters register themselves."""
 
@@ -462,6 +470,7 @@ class LucyApp:
             lambda s: build_tools(s, clock=clock, reminder_store=self._reminder_store)
         )
         self._reminder_store: SQLiteReminderStore | None = None
+        self._vision: VisionService | None = None
         self._reminders: ReminderService | None = None
         self._tools: list[Tool] = []
         self._provider_builder = provider_builder or build_tool_providers
@@ -566,6 +575,12 @@ class LucyApp:
         return self._reminders
 
     @property
+    def vision(self) -> VisionService | None:
+        """The vision service (ADR 0026), when `[vision]` is enabled and something uses it.
+        Only voice clients glance with it (stage 3); `lucy chat` never does."""
+        return self._vision
+
+    @property
     def residency(self) -> Residency | None:
         """The model residency policy, when it is running."""
         return self._residency
@@ -603,6 +618,58 @@ class LucyApp:
         if self._runner is not None:
             self._runner.notify()
         return enqueued
+
+    def _build_vision(self, create: Callable[..., Any]) -> VisionService | None:
+        """The `VisionService` (ADR 0026) when `[vision]` is enabled and a tool or the
+        glance (stage 3) uses it. Creating the camera adapter does not open the camera."""
+        config = self.settings.vision
+        used = bool(VISION_TOOLS & set(self.settings.tools.enabled)) or config.glance
+        if not config.enabled or not used:
+            return None
+        assert self._gateway is not None
+        camera = create("camera", config.camera.adapter, **config.camera.options)
+        if not isinstance(camera, Camera):
+            raise TypeError(f"camera adapter {config.camera.adapter!r} is not a Camera")
+        recognizer, book, off = self._build_faces(create)
+        faces = config.faces
+        return VisionService(
+            gateway=self._gateway,
+            camera=camera,
+            role=config.role,
+            timeout=config.timeout,
+            recognizer=recognizer,
+            book=book,
+            rules=FaceRules(
+                threshold=faces.threshold,
+                min_score=faces.min_score,
+                min_size=faces.min_size,
+                enrol_frames=faces.enrol_frames,
+            ),
+            faces_off=off,
+        )
+
+    def _build_faces(
+        self, create: Callable[..., Any]
+    ) -> tuple[FaceRecognizer | None, FaceBook | None, str | None]:
+        """The face recogniser and book (stage 2), or why face matching is off. Missing
+        models switch it off with one warning naming `lucy vision download`; `look`
+        keeps working without names. Creating the adapter starts nothing."""
+        faces = self.settings.vision.faces
+        if not faces.enabled:
+            return None, None, None
+        options = {"models": faces.models, "pack": faces.pack, **faces.options}
+        recognizer = create("faces", faces.adapter, **options)
+        if not isinstance(recognizer, FaceRecognizer):
+            raise TypeError(f"faces adapter {faces.adapter!r} is not a FaceRecognizer")
+        book = FaceBook(Workspace(self.settings.workspace.path))
+        if getattr(recognizer, "present", True) is False:
+            off = (
+                f"the face models ({faces.pack}) are not downloaded; the user can run "
+                "`lucy vision download` in a terminal, then restart Lucy"
+            )
+            logger.warning("face matching is off: %s", off)
+            return recognizer, book, off
+        return recognizer, book, None
 
     # --- Lifecycle ----------------------------------------------------------------
 
@@ -656,6 +723,11 @@ class LucyApp:
             for tool in self._tools:
                 if hasattr(tool, "voice_client"):  # the voice enrolment tools
                     tool.voice_client = self._speech  # type: ignore[attr-defined]
+            vision = self._vision = self._build_vision(create)
+            if vision is not None:
+                for tool in self._tools:
+                    if hasattr(tool, "vision_service"):  # look and the face tools
+                        tool.vision_service = vision  # type: ignore[attr-defined]
             if ENROL_TOOLS & {t.name for t in self._tools}:
                 timer_handlers[ENROLMENT_TIMER] = handle_enrolment
             selector = build_selector(self.settings, self._tools, extra_guidance)
@@ -967,6 +1039,9 @@ class LucyApp:
             tools, self._own_tools, self._tools = self._own_tools, [], []
             for tool in tools:
                 await _close_quietly(tool, "aclose")
+            vision, self._vision = self._vision, None
+            if vision is not None:
+                await vision.aclose()
             self._reminders = None
             reminder_store, self._reminder_store = self._reminder_store, None
             if reminder_store is not None:

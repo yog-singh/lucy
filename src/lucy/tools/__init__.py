@@ -11,6 +11,8 @@ always ask the user first) need none either: they use the macOS calendar store, 
 load EventKit only on their first call. The reminder tools (`reminders`,
 `set_reminder`, `set_timer`, `cancel_reminder`) keep reminders in the SQLite memory
 database; building them fails when memory is not the SQLite store on a file.
+The `look` tool takes one camera frame and has the vision model describe it (ADR
+0026); the app attaches its `VisionService` when `[vision]` is enabled.
 
 Every name in the catalogue has an options table in `ToolsSettings`
 (`lucy.core.config`), which is where unknown names and missing options are
@@ -31,8 +33,10 @@ from lucy.core.reminders import ReminderStore
 from lucy.core.toolsets import ToolGroup
 from lucy.tools.calendar_changes import DeleteCalendarEventTool, EditCalendarEventTool
 from lucy.tools.calendar_events import AddCalendarEventTool, CalendarTool
+from lucy.tools.face_enrolment import EnrollFaceTool, ReplaceFaceTool
 from lucy.tools.fetch_page import FetchPageTool
 from lucy.tools.local_time import TimeTool
+from lucy.tools.look import LookTool
 from lucy.tools.netguard import Resolver, system_resolver
 from lucy.tools.reminders import (
     CancelReminderTool,
@@ -89,6 +93,9 @@ CATALOGUE: Final[dict[str, Factory]] = {
     ),
     "enroll_voice": lambda s, _transport, _resolver, _clock: EnrollVoiceTool(s),
     "replace_voice": lambda s, _transport, _resolver, _clock: ReplaceVoiceTool(s),
+    "look": lambda s, _transport, _resolver, _clock: LookTool(s),
+    "enroll_face": lambda s, _transport, _resolver, _clock: EnrollFaceTool(s),
+    "replace_face": lambda s, _transport, _resolver, _clock: ReplaceFaceTool(s),
 }
 
 
@@ -181,6 +188,26 @@ GROUPS: Final[tuple[ToolGroup, ...]] = (
         ("enroll_voice", "replace_voice"),
         ("enrol", "enroll", "enrolment", "enrollment", "voice", "voices", "recognise", "recognize",
          "awaaz", "aawaz", "awaz", "pehchan", "pehchaan", "pehchano"),
+    ),
+    ToolGroup(
+        "vision",
+        "looking through the camera: what is in front of it, what the user is holding, "
+        "who is there, and learning a person's face",
+        ("look", "enroll_face", "replace_face"),
+        # Bare "see" and "look" are left out, as are "see that", "see what", "photo" and
+        # "picture": "let me see", "I see that", "look up", "picture this" are everyday
+        # speech and would switch the group on constantly.
+        ("camera", "webcam", "can you see", "do you see", "what do you see", "you see me",
+         "see me", "see this", "look at", "take a look", "have a look",
+         "looking at", "what am i holding", "what i'm holding", "what is this", "what's this",
+         "what is that", "what's that", "how do i look", "what colour", "what color",
+         "showing you", "in front of", "dekho", "dekh", "dekhna", "dekhke",
+         "dekh ke", "dekh kar", "dikh", "dikhta", "dikhti", "dikhai", "dikha", "dikhao",
+         "kya hai ye", "ye kya hai", "yeh kya hai", "kya hai yeh", "mere haath", "haath mein",
+         "kaisa lag", "kaisi lag", "kaun sa rang", "kya pakda", "my face", "remember my face",
+         "learn my face", "enrol my face", "enroll my face", "who is here",
+         "who's here", "who is there", "who do you see", "recognise me", "recognize me",
+         "chehra", "chehre", "kaun hai", "kaun hoon"),
     ),
 )  # fmt: skip
 

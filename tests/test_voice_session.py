@@ -81,6 +81,7 @@ class Harness:
         tools: Sequence[Any] = (),
         orchestrate: bool = True,
         speakers: Any = None,
+        glancer: Any = None,
     ) -> None:
         self.bus = EventBus()
         self.llm = FakeLLM(scripts)
@@ -112,6 +113,7 @@ class Harness:
             ui=self.ui,
             timings_path=timings_path,
             speakers=speakers,
+            glancer=glancer,
         )
         self._orchestrator_task: asyncio.Task[None] | None = None
         self.run_task: asyncio.Task[None] | None = None

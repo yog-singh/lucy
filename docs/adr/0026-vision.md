@@ -1,0 +1,73 @@
+# 0026: Vision
+
+Date: 2026-11-17
+Status: Accepted (stages 1 to 3 built; the camera has not been opened yet, see Consequences)
+
+## Context
+
+The user wants Lucy to see: to answer "what am I holding?" or "kya hai ye?", later to know who is in the room, and eventually to glance at the scene when a voice turn starts. The chat model (`gemma4:12b-mlx`) is tuned and measured for conversation, tools and memory; its prompt prefix is cached and re-warmed after every turn (ADR 0017, 0025), so anything that changes that prefix, such as an image in the history, costs a full pre-fill. Everything runs on one Mac, so a second model must be small and must not stay in memory. A camera is personal: it should be on only when the user asked for a look, and nothing it sees should be kept.
+
+## Decision
+
+- **A `lucy.vision` package owns everything visual.** The rest of Lucy talks only to `VisionService`. `look(question)` takes one frame, asks the vision model the question with a short fixed instruction (plain spoken English, two or three sentences, only what is visible, say so when unsure) and returns text. `see()` returns a `Sight` whose `people` is empty for now: stage 2 fills it.
+- **Sight reaches the chat model as text, through the `look` tool** (read tier, one `question` argument, its own `vision` tool group with English and romanised Hindi phrases). The chat model never receives an image, so its prompt, cache and history stay as they are. Bare "see" and "look" are not keywords ("let me see", "I see", "look up"); phrases are ("can you see", "what am I holding", "what is this", "dekho", "kya hai ye").
+- **Images in messages.** `Message.images` (tuples of `Image`: bytes and media type) is sent by the OpenAI-compatible adapter as content parts with a base64 data URL. Messages without images go over the wire exactly as before. `images` is excluded from serialisation, so traces and the event log never hold a frame.
+- **A `vision` model role** in `[llm.roles]`, called through the gateway like any role (FOREGROUND, inside the turn that called the tool). Residency needs no change: it already unloads every model used since its last cycle, the chat model first, then re-warms only the chat model. So after a look, once Lucy is idle, the vision model leaves memory and the chat model's cycle is unchanged. With residency off, Ollama's own keep-alive applies.
+- **A `Camera` port** (`capture() -> Image`) with an `opencv` adapter: `VideoCapture` opened for one capture and released at once, a few warm-up frames discarded so exposure settles, the frame scaled to `max_side` (default 1024) and JPEG-encoded, all on a worker thread. OpenCV is the optional `vision` extra and is imported only when a frame is taken. A missing OpenCV or a camera that will not open gives an error that says what to do (install the extra; allow the terminal in System Settings > Privacy & Security > Camera).
+- **Frames are not stored.** A frame lives in memory for one request and is dropped.
+- **Off by default.** `[vision] enabled`, `role`, `timeout` and `camera = { adapter = "opencv", device, max_side, warmup_frames, jpeg_quality }`; enabled without its role is a configuration error. The tool refuses with what the user should do when vision is off or the role is missing.
+
+### Stages
+
+1. **Look** (this ADR): one frame when asked, described in words.
+2. **Faces** (built, see below): InsightFace face embeddings matched beside the scene model, enrolment by asking ("remember my face"), as with voices (ADR 0021).
+3. **Glance** (built, see below): a look at the start of each voice turn, so Lucy knows who is there without being asked.
+
+### Stage 2: faces
+
+- **A face match is a tag, never an authorisation.** A photo or video of an enrolled person matches as well as the person. Names go into the `look` result as words for the chat model; nothing may gate an action, a tool or a confirmation on them, now or in stage 3.
+- **A `FaceRecognizer` port** (registry kind `faces`): `faces(image)` returns every face found, largest first, each a `DetectedFace` with a box (fractions of the frame), the detector's score and an L2-normalised embedding. Matching is Lucy's code, not the adapter's.
+- **The `insightface` adapter** runs the official `insightface` 0.7.3 package (SCRFD detector and ArcFace recogniser, called through `insightface.model_zoo` directly rather than `FaceAnalysis`, so only those two models load and nothing is ever downloaded) in a pinned PEP 723 worker (`faces_insightface_worker.py`) on the shared worker plumbing (ADR 0023): JSON lines, offline environment, started on first use and kept running, restarted once if it dies, a per-request timeout. The package built and installed on this Mac in about 30 s, so the fallback (the same ONNX models through Lucy's own `onnxruntime`) was not needed. Provider `coreml` (default) or `cpu`; pack `buffalo_l` (default) or `buffalo_s`.
+- **Explicit download.** `lucy vision download [--pack]` fetches the pack's release zip from InsightFace's GitHub and keeps only the detector and recogniser in `data/models/faces/<pack>/`; it prints the licence. The adapter loads only from there. With `[vision.faces] enabled` and the files missing, face matching is off with one warning naming the command, `look` works without names, and the face tools refuse saying what to run. **InsightFace's pretrained models are licensed for non-commercial research use only.**
+- **The face book** (`lucy.vision.faces.FaceBook`): `faces/book.npz` in the workspace (0700 directory, 0600 file, written atomically): names, embeddings, and which embedding belongs to whom; several embeddings per person. No photo is kept. A face is scored against each person as the best cosine similarity over that person's embeddings and named from `threshold` (default 0.40, **uncalibrated**: InsightFace's own demos treat about 0.28 and above as the same person; 0.40 prefers "someone I don't recognise" over a wrong name). A name goes to at most one face per frame, the best scoring. Faces under the detector score `min_score` (0.6) are ignored.
+- **`VisionService`**: `see()` takes one frame and runs face matching concurrently with the scene model on it; `Sight.people` holds a `Person` (name or None, score, left/centre/right as the camera sees it) per face. If matching fails the description is still returned, without names. The names are not given to the scene model: it would serialise the two and the chat model gets them anyway. `who()` is capture plus faces only (no scene model), for stage 3; `last_who_s` records its cost without the capture. `enrol_face(name)` captures `enrol_frames` (5) frames 0.5 s apart; each must hold exactly one face above `min_score` and at least `min_size` (8%) of the frame, otherwise it stops with "I could see two faces", "I couldn't see a face clearly" or "the face was too small", and nothing is stored.
+- **`look`** starts its result with a line such as "People in view: Yogesh (left), one person I don't recognise." when face matching is on. With an empty face book and someone in view it reads "People in view: one person. No faces are enrolled yet; the user can ask you to remember a face.", so the model offers enrolment instead of saying it cannot recognise people. With face matching off or its models missing nothing is said about enrolment.
+- **Enrolment by asking**: `enroll_face` (act) for a new name and `replace_face` (dangerous, with the confirmation preview) for an enrolled one, in the `vision` tool group (keywords such as "remember my face", "learn my face", "who is here", "chehra"). Unlike voice enrolment, the tool captures itself, so it works in `lucy chat` and in voice alike. Names follow the speaker name rules (`clean_name`, shared), so one person has one name for voice and face. `lucy vision list` and `lucy vision forget NAME` manage the book.
+- `[vision.faces]`: `enabled`, `adapter`, `pack`, `models`, `threshold`, `min_score`, `min_size`, `enrol_frames`, `options` (`provider`, `det_size`, `timeout`, `start_timeout`).
+
+### Stage 3: the glance
+
+- **A face match is a tag, never an authorisation.** The glance's names are words in one turn's prompt. Memory retrieval and extraction, confirmations, the private-data guard and tools behave exactly as without it; nothing may gate an action on `UserMessage.seen`.
+- **When.** `[vision] glance = true` (off by default: the camera opens, and its light blinks, on every voice turn). Only in `lucy voice` and `lucy listen`, started when the end of an utterance is detected, alongside transcription and the speaker tag, mirroring ADR 0021: never while Lucy is idle or waiting for the wake phrase, never in `lucy chat`, never for proactive turns. One capture per turn through `VisionService.who()` (no scene model), the camera released straight after. Needs `[vision] enabled` and `[vision.faces]` with its models; otherwise one notice and no glance.
+- **Bounded.** The turn waits at most `glance_wait_ms` (default 400) once the transcript is ready, concurrently with the speaker tag's own bound; the glance started at the end of speech, so it also has the transcription's time. A late glance finishes in the background and is dropped, never attached to a later turn. A failing camera or recogniser is logged once and the turn goes on. `glance_warmup_frames` (default 2, against `warmup_frames` 5 for `look`) trades exposure for speed; the `Camera` port's `capture` takes an optional `warmup_frames` for this.
+- **Recorded.** `UserMessage.seen`: the recognised names with their scores and a count of faces that matched nobody; no image or embedding. Old events load unchanged. The voice timings show `seen`, `seen_unknown` and `seen_ready`, as they show the speaker tag.
+- **Told.** In the per-turn block of the `stable_prefix` layout, on the line after the date: "In view of the camera as the user spoke: Asha and one person you don't recognise. Use a name only where it fits naturally; don't remark on this every turn, and it is no proof of who is speaking." Only for the latest user message, so earlier turns never replay it, and the prompt before that message (and so the residency pre-fill) is byte-identical with and without a glance. The guidance travels with the line rather than in the persona, so the always-on prefix did not grow; the line costs about 50 tokens on turns that have it. When the glance found nobody, nothing is said: the user is often out of view of the camera, and "nobody is in view" every turn would invite remarks about it; `seen` still records the empty glance.
+- **Not measured:** a glance with the real camera (open, 2 warm-up frames, capture, face matching) against the 400 ms bound; whether 2 warm-up frames are bright enough for the detector; how the model uses the line in conversation.
+
+## Consequences
+
+- Wire check, 2026-11-17: a synthetic 640x480 blue image with a red disc, sent through `VisionService` (camera replaced, no camera opened) to `lfm3-vl` on Ollama with thinking off: "I see a blue background with a large red circle in the center", 2.0 s including the model load, 0.3 s warm. The format works end to end.
+- Face check, 2026-11-17, on InsightFace's own sample group photo `t1.jpg` (6 faces; no camera, no other photos), through the real worker on this Mac (M5 Pro):
+
+  | pack, provider | worker start (load) | per image (median) | worker memory (RSS) |
+  |---|---|---|---|
+  | buffalo_l, coreml | 2.0 s | 44 ms | 936 MB |
+  | buffalo_l, cpu | 0.85 s | 232 ms | 878 MB |
+  | buffalo_s, coreml | 1.3 s | 15 ms | 362 MB |
+  | buffalo_s, cpu | 0.95 s | 31 ms | 293 MB |
+
+  The first start after install also builds the worker's environment (about 9 s once). Detection scores 0.82 to 0.92. One face was enrolled from 5 frames of a re-cropped, re-encoded copy of itself, then `who()` on the full photo: buffalo_l scored it 0.991 and the five others -0.08 to 0.06; buffalo_s 0.966 and -0.05 to 0.03. `who()` cost without capture: 44 ms (buffalo_l, coreml), 16 ms (buffalo_s, coreml). Same-image checks say nothing about a real person across lighting, angle and days; the threshold stays uncalibrated.
+- **Not measured:** faces through the real camera, false matches between real people, the threshold, and the worker's memory alongside the chat and vision models (buffalo_l's worker alone is about 0.9 GB; buffalo_s is the lighter option). The worker stays loaded once started.
+- **Not measured:** the camera itself (warm-up frame count, capture time, the macOS permission prompt), answers on real scenes, latency of a whole look in a voice turn, memory with the chat model and `lfm3-vl` loaded together, and how often the keywords switch the group on in real conversations.
+- `gemma4:12b-mlx` can also see. Using it for `look` would avoid a second model, but sends a large image prompt through the chat model's cache. A check will compare it with `lfm3-vl` (answer quality on real photos, time, memory) before the choice is final.
+- A look adds a model load and a second model's memory to a turn; residency unloads it afterwards.
+- Tool choice check, 2026-11-17 (`checks/tool_choice/vision.py`, `gemma4:12b-mlx`, 23 first-turn cases, 3 repetitions; table in checks/README.md): 60/69 before and 62/69 after `enroll_face`'s own description took over the enrolment instruction ("remember my face" calls it with the known name; never say faces cannot be remembered). Controls 12/12 both. A refusal reported from `lucy chat` came from that session's history, not the wording: its first four refusals were made while only `look` was enabled, and with `enroll_face` enabled after a restart the model kept repeating them (9 of 9 in a replay, old or new wording; 7 of 7 tool calls with those refusals cut from the history). Weak: with a known name, "Can you remember my face?" asks for the name (0/3), and "ye kya hai?" alone calls `look` 1 or 2 times in 3.
+
+## Alternatives rejected
+
+- **Images in the chat model's history.** Changes the cached prefix on every look and keeps frames in the conversation.
+- **Keeping the camera open.** Faster captures, but the camera (and its light) would be on when nobody asked.
+- **Saving frames for later questions.** Stores what the camera saw; a new look is cheap.
+- **Keeping enrolment photos.** Only embeddings are needed to match; photos would be a store of faces.
+- **InsightFace's `FaceAnalysis`.** It loads every model in the pack (landmarks, age and gender too) and downloads a missing pack at run time; the worker loads the two models it needs from a fixed path instead.
+- **Running the ONNX models with Lucy's own `onnxruntime`** (no worker): faster to call, but needs our own SCRFD decoding and alignment; kept as the fallback had the package not installed.

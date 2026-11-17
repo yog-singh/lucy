@@ -94,6 +94,48 @@ Results, 2026-11-17, `gemma4:12b-mlx`, thinking off, user's `lucy.toml` (15 buil
 
 "On, as built" used the first calendar stub, so its follow-up and expired rows are not comparable. No `more_tools` call named a wrong group or was repeated, and none was made in a no-tool turn. Failing in both modes: Wikipedia for "capital of Japan" and "why is the sky blue" (4 needless), searching mail for "send an email to Ana" (2), the model asking its own "are you sure?" before a delete or move (2 off, 3 on). Still worse with the feature on after the fixes: "recognise my brother Ravi" (voice now switched on by keyword, but the model asked "What is Ravi's name?" instead of calling `enroll_voice`, 2 of 2; off: 2 of 2 correct) and one "delete the workout" answered "I've removed the workout" with no call.
 
+### Vision tools (`vision.py`)
+
+Whether the first model step calls `look` or `enroll_face` (ADR 0026) with dynamic loading on. One message per case, some after a scripted earlier exchange (written straight to the episode log), each in a fresh session, through the real app, prompt assembly and chat model, with the `dynamic.py` stubs and `look`, `enroll_face` and `replace_face` enabled. `[vision]` is switched off in the copied settings, so no camera or face model is created; when the first step calls a tool the turn is interrupted, and only that step is scored. `known` cases get a fixed profile ("Sam lives in Pune...") as what Lucy knows about the user; the others know no name.
+
+```
+uv run python checks/tool_choice/vision.py --config lucy.toml --out DIR --label LABEL --reps 3 [--cases a,b] [--no-stale-filter]
+uv run python checks/tool_choice/vision.py --config lucy.toml --show-specs   # the vision specs as sent
+```
+
+- About 3 minutes at 3 repetitions. Rows go to `DIR/LABEL/rows.json` (default `data/checks/tool_choice_vision/`).
+- Outcomes: `pass`; `refused` (no tool and no question for a name); `asked_name` (asked for a name that the profile gives); `wrong_tool`; `bad_name` (a placeholder such as "me", or not the expected name); `made_up_name` (called with a name when none was known). Enrolment with no known name passes only when she asks for the name; controls ("let me see", "look up the news", "what's the weather", "Look at the time... what time is it in London?") pass when no vision tool is called.
+
+Results, 2026-11-17, `gemma4:12b-mlx`, thinking off, user's `lucy.toml`, 3 repetitions. Before: the old `enroll_face` description (the enrolment instruction only in the group guidance riding on `look`). After: `enroll_face`'s own description says faces are remembered only with it, names "remember my face" and "mera chehra yaad rakho", says never to claim it cannot remember faces, and to pass the known name. `known_after_memory_talk` was added after the "before" run; its "before" is a separate run.
+
+| case | before | after |
+|---|---|---|
+| enrol_can_you / remember / learn / named / hindi (no name known) | 15/15 | 15/15 |
+| enrol_after_refusal (one "I cannot remember your face" in history) | 2/3 (1 refused) | 3/3 |
+| enrol_named_after_refusal | 3/3 | 3/3 |
+| known_can_you "Can you remember my face?" | 1/3 (2 asked name) | 0/3 (3 asked name) |
+| known_remember | 3/3 | 3/3 |
+| known_learn | 2/3 (1 asked name) | 3/3 |
+| known_hindi "mera chehra yaad rakho" | 0/3 (3 asked name) | 3/3 |
+| known_after_refusal | 3/3 | 2/3 (1 asked name) |
+| known_after_memory_talk | 3/3 | 3/3 |
+| known_after_no_recognise | 2/3 (1 asked name) | 2/3 (1 asked name) |
+| look_holding / see_me / who / after_refusal | 12/12 | 12/12 |
+| look_hindi "ye kya hai?" | 2/3 (1 refused) | 1/3 (2 asked what she meant) |
+| controls (4) | 12/12 | 12/12 |
+
+Stale exchanges (ADR 0025 amendment, 2026-11-17). The `*_recorded` cases write a `ToolsConfigured` record of the tools without `enroll_face` and `replace_face`, then two or three "I cannot remember your face" exchanges, then "Remember my face." (the orchestrator records the full set before it); `--no-stale-filter` keeps the stale exchanges in the prompt. 5 repetitions, gemma4:12b-mlx:
+
+| case | filter bypassed | filter on |
+|---|---|---|
+| enrol_after_refusals_recorded (no name known, 3 refusals) | 0/5 (5 refused) | 5/5 |
+| known_after_refusals_recorded (name known, 3 refusals) | 0/5 (5 refused) | 2/5 (3 asked name) |
+
+A whole run afterwards, 3 repetitions: 62/75; the two new cases 5/6; the other cases 57/69 against 62/69 in the "after" column above, the difference all in name-known cases with no history (`known_remember` 1/3, `known_learn` 0/3, `known_hindi` 0/3, all "asked name"), whose prompt the filter cannot change (there is no earlier exchange): run-to-run variation of the known asking-the-name weakness, or another change in the working tree, not the filter.
+| all | 60/69 | 62/69 |
+
+No case reproduced the refusal reported from `lucy chat` in a fresh session. Its cause was in that session's history: the four first "remember my face" turns were offered `look` only (the face tools were not yet enabled), so refusing was right; after the restart with them enabled, the next three turns, with `enroll_face` offered, followed the four refusals in the history. Replaying those three real steps (one-off, from the trace, not part of this check) gave 9 of 9 refusals with the old description and 9 of 9 with the new one, also with a sentence saying an earlier refusal predates the tool; with the earlier refusals cut from the history, 4 of 4 (old) and 3 of 3 (new) called `enroll_face` with the user's name. A persona edit ("a face is different") alone did not help (0 of 3).
+
 ## endings
 
 18 turns in one session through the real app (greetings, small talk, a joke, a conversation about space, short facts, thanks, an ambiguous "tell me more about him") that in real use drew closing offers of help and follow-up menus. Classifies the last sentence of each reply with regexes as `offer` (O), `menu` (M, "would you like to know more...", "anything else you'd like to..."), another question (`?`) or no question (`.`); `*` marks turns where a question is fine (greetings, the ambiguous request, the open topic turns). `uv run python checks/endings/endings.py` (about 1 minute; database in `data/checks/endings/LABEL/`). The regexes are rough: read the replies, not only the counts.

@@ -305,6 +305,25 @@ class ReplaceVoiceSettings(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
 
+class LookSettings(BaseModel):
+    """The `look` tool (read tier): one camera frame described by the vision model.
+    Its options are in `[vision]` (ADR 0026)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+
+class EnrollFaceSettings(BaseModel):
+    """The `enroll_face` tool (act tier). Needs `[vision.faces] enabled` (ADR 0026)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+
+class ReplaceFaceSettings(BaseModel):
+    """The `replace_face` tool (dangerous: asks first). Needs `[vision.faces] enabled`."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+
 _TOOLS_OPTIONS: Final = ("enabled", "confirm_timeout", "dynamic", "core", "keep_turns")
 """`[tools]` keys that are not tool names."""
 
@@ -352,6 +371,9 @@ class ToolsSettings(BaseModel):
     cancel_reminder: CancelReminderSettings = Field(default_factory=CancelReminderSettings)
     enroll_voice: EnrollVoiceSettings = Field(default_factory=EnrollVoiceSettings)
     replace_voice: ReplaceVoiceSettings = Field(default_factory=ReplaceVoiceSettings)
+    look: LookSettings = Field(default_factory=LookSettings)
+    enroll_face: EnrollFaceSettings = Field(default_factory=EnrollFaceSettings)
+    replace_face: ReplaceFaceSettings = Field(default_factory=ReplaceFaceSettings)
 
     @classmethod
     def known_tools(cls) -> list[str]:
@@ -847,6 +869,69 @@ class ResidencySettings(BaseModel):
     """Optional: unload only when the loaded model takes at least this many GB."""
 
 
+class FacesSettings(BaseModel):
+    """Recognising people by face (ADR 0026, stage 2): InsightFace models, matched
+    against the face book in the workspace's `faces/`.
+
+    A face match is a tag, never an authorisation: a photo of an enrolled person
+    matches as well as the person. `lucy vision download` fetches the models into
+    `models`; they are never fetched at run time.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    enabled: bool = False
+    adapter: str = Field(default="insightface", min_length=1)
+    pack: Literal["buffalo_l", "buffalo_s"] = "buffalo_l"
+    """The InsightFace model pack: `buffalo_l` (larger, more accurate) or `buffalo_s`."""
+    models: str = "data/models/faces"
+    """The directory `lucy vision download` fills; the pack is a folder inside it."""
+    threshold: float = Field(default=0.40, gt=0, lt=1)
+    """Cosine similarity from which a face counts as an enrolled person. Uncalibrated:
+    InsightFace's own demos treat about 0.28 and above as the same person; 0.40 prefers
+    "someone I don't recognise" over a wrong name. Calibrate on your own faces."""
+    min_score: float = Field(default=0.6, gt=0, lt=1)
+    """Detector confidence a face needs to be counted (and, for enrolment, used)."""
+    min_size: float = Field(default=0.08, gt=0, lt=1)
+    """Smallest face, as a fraction of the frame's shorter side, that enrolment accepts."""
+    enrol_frames: int = Field(default=5, ge=3, le=10)
+    """Frames captured for one face enrolment, about half a second apart."""
+    options: dict[str, Any] = Field(default_factory=dict)
+    """Extra adapter options (insightface: `provider` "coreml" (default) or "cpu", `det_size`,
+    `timeout`, `start_timeout`)."""
+
+
+class VisionSettings(BaseModel):
+    """Lucy looking through a camera when asked (ADR 0026; the `look` tool).
+
+    `camera` picks the camera adapter (`opencv`: `device`, `max_side`,
+    `warmup_frames`). `role` is the `[llm.roles]` role of the model that sees.
+    The camera is on only for one capture; frames are never stored.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    enabled: bool = False
+    role: str = Field(default="vision", min_length=1)
+    camera: AdapterConfig = Field(default_factory=lambda: AdapterConfig(adapter="opencv"))
+    timeout: float = Field(default=60.0, gt=0, le=600)
+    """Seconds a look may take, capture and model answer together."""
+    faces: FacesSettings = Field(default_factory=FacesSettings)
+    """Recognising people by face (stage 2)."""
+    glance: bool = False
+    """Stage 3: in `lucy voice` and `lucy listen`, one capture and face match as each
+    utterance ends, so the chat model is told who is in view. Opens the camera (and
+    lights its light) on every voice turn. Needs `enabled` and `[vision.faces]` with
+    its models. A tag, never an authorisation."""
+    glance_wait_ms: int = Field(default=400, ge=0, le=5000)
+    """How long a turn waits for the glance once the transcript is ready (the glance
+    starts at the end of speech, so it also has the transcription's time). Late
+    glances are dropped. Not measured on a real camera."""
+    glance_warmup_frames: int = Field(default=2, ge=0, le=60)
+    """Frames the camera reads and discards before the glance's frame (the `look`
+    capture uses the camera's own `warmup_frames`): fewer is faster but darker."""
+
+
 DEFAULT_MEMORY: Final = AdapterConfig(adapter="sqlite", options={"path": "data/lucy.db"})
 """The memory store used when the settings have no `[memory]` section."""
 
@@ -872,6 +957,17 @@ class Settings(BaseModel):
     residency: ResidencySettings = Field(default_factory=ResidencySettings)
     workspace: WorkspaceSettings = Field(default_factory=WorkspaceSettings)
     speakers: SpeakersSettings = Field(default_factory=SpeakersSettings)
+    vision: VisionSettings = Field(default_factory=VisionSettings)
+
+    @model_validator(mode="after")
+    def _check_vision(self) -> Self:
+        if self.vision.enabled and self.vision.role not in self.llm.roles:
+            raise ValueError(
+                f"[vision] is enabled but [llm.roles] has no {self.vision.role!r} role; add "
+                'one for a model that can see, e.g. vision = { adapter = "ollama", '
+                'model = "lfm3-vl", extra = { reasoning_effort = "none", max_tokens = 300 } }'
+            )
+        return self
 
 
 def load_settings(path: str | Path) -> Settings:

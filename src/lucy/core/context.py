@@ -35,6 +35,7 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from lucy.core.events import Seen
 from lucy.core.types import MemoryContext, Message, Role
 
 SectionName = Literal[
@@ -59,6 +60,30 @@ def date_line(now: datetime) -> str:
     and always its UTC offset, so the model can convert to other zones; a naive one
     is labelled "(local time)"."""
     return f"Today is {now:%A}, {now.day} {now:%B %Y, %H:%M} {_zone(now)}."
+
+
+_COUNT = ("no", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine")
+
+SEEN_GUIDANCE = (
+    "Use a name only where it fits naturally; don't remark on this every turn, "
+    "and it is no proof of who is speaking."
+)
+
+
+def seen_line(seen: Seen | None) -> str:
+    """The per-turn line about the glance (ADR 0026, stage 3), e.g. "In view of the
+    camera as the user spoke: Yogesh and one person you don't recognise. ...", or ""
+    when no glance ran or nobody was in view. Nobody in view says nothing: the user
+    is often out of the camera's view, and a line would invite remarks about it."""
+    if seen is None or (not seen.people and not seen.unknown):
+        return ""
+    parts = list(dict.fromkeys(seen.names))
+    if seen.unknown:
+        count = _COUNT[seen.unknown] if seen.unknown < len(_COUNT) else str(seen.unknown)
+        noun = "person" if seen.unknown == 1 else "people"
+        parts.append(f"{count} {noun} you don't recognise")
+    who = parts[0] if len(parts) == 1 else f"{', '.join(parts[:-1])} and {parts[-1]}"
+    return f"In view of the camera as the user spoke: {who}. {SEEN_GUIDANCE}"
 
 
 def _zone(now: datetime) -> str:
@@ -195,11 +220,14 @@ class ContextBuilder:
         history: Sequence[Message],
         context_window: int,
         reserve_output: int = 1024,
+        turn_note: str = "",
     ) -> BuiltContext:
         """Assemble the messages for one LLM call.
 
         `history` must already end with the current user message, which is always
-        kept even if it alone exceeds the history budget.
+        kept even if it alone exceeds the history budget. `turn_note` is a line about
+        this turn only (the glance's `seen_line`): next to the date line, so in the
+        `"stable_prefix"` layout it is in the per-turn block and the prefix is unchanged.
         """
         date = self._date()
         persona = f"{self._persona}\n\n{date}" if date else self._persona
@@ -217,11 +245,13 @@ class ContextBuilder:
         kept_history, history_report = self._history(history, budgets["history"])
 
         if self._layout == "system":
-            parts = [persona, profile_text, instructions_text, memories_text]
+            first = "\n".join(p for p in (persona, turn_note) if p)
+            parts = [first, profile_text, instructions_text, memories_text]
             messages = [_system(parts), *kept_history]
         else:
             stable = _system([self._persona, instructions_text, profile_text])
-            messages = [stable, *self._with_turn_block(kept_history, [date, memories_text])]
+            block = ["\n".join(p for p in (date, turn_note) if p), memories_text]
+            messages = [stable, *self._with_turn_block(kept_history, block)]
         return BuiltContext(
             messages=messages,
             report=[
