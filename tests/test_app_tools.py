@@ -11,11 +11,12 @@ from pathlib import Path
 import httpx
 import pytest
 
-from lucy.app import LucyApp, system_prompt
-from lucy.core.config import Settings, ToolsSettings
+from lucy.app import LucyApp, system_prompt, voice_speaks_hindi
+from lucy.core.config import AdapterConfig, Settings, ToolsSettings
 from lucy.core.events import ToolFinished, ToolStarted
 from lucy.core.ports import Tool
-from lucy.core.types import FinishReason, LLMChunk, Role, ToolCall
+from lucy.core.registry import Registry
+from lucy.core.types import FinishReason, LLMChunk, Role, ToolCall, TTSCaps
 from lucy.prompts import load_prompt
 from lucy.tools import build_tools
 from lucy.tools.wikipedia import WikipediaTool
@@ -283,3 +284,68 @@ def test_history_tokens_default_bounds_the_prompt() -> None:
     from lucy.core.config import ContextSettings
 
     assert ContextSettings().history_tokens == 1200
+
+
+REPLY_LANGUAGE = "Reply in the language of the user's latest message"
+ENGLISH_ONLY = load_prompt("language_en").strip()
+
+
+class HindiVoice:  # like the magpie adapter: capabilities on the class
+    capabilities = TTSCaps(streaming=True, languages=frozenset({"en", "hi"}))
+
+
+class EnglishVoice:  # like the phonon (Ollama) adapter: capabilities set per instance
+    def __init__(self) -> None:
+        self.capabilities = TTSCaps(streaming=True)
+
+
+def with_tts(settings: Settings, adapter: str) -> Settings:
+    return settings.model_copy(update={"tts": AdapterConfig(adapter=adapter, options={})})
+
+
+def test_the_english_only_paragraph_replaces_the_reply_language_one() -> None:
+    hindi, english = system_prompt(True), system_prompt(True, hindi=False)
+    assert REPLY_LANGUAGE in hindi and "Devanagari" in hindi
+    assert ENGLISH_ONLY not in hindi
+    assert REPLY_LANGUAGE not in english and "Devanagari" not in english
+    assert ENGLISH_ONLY in english
+    # Only that paragraph changes, in place.
+    assert hindi.count("\n\n") == english.count("\n\n")
+    assert system_prompt(False, hindi=False).endswith(load_prompt("persona").strip()[-80:])
+    for word in ("tool", "calendar"):
+        assert word not in ENGLISH_ONLY.lower()
+
+
+def test_hindi_replies_follow_the_configured_voice(tmp_path: Path) -> None:
+    reg = Registry()
+    reg.register("tts", "hindi")(HindiVoice)
+    reg.register("tts", "english")(EnglishVoice)
+    settings = make_settings(tmp_path / "lucy.db")
+    assert voice_speaks_hindi(settings, reg)  # no voice configured: text only
+    assert voice_speaks_hindi(with_tts(settings, "hindi"), reg)
+    assert not voice_speaks_hindi(with_tts(settings, "english"), reg)
+    assert not voice_speaks_hindi(with_tts(settings, "missing"), reg)
+
+
+def test_the_builtin_voices_declare_their_languages() -> None:
+    from lucy.adapters.tts_magpie import MagpieTTS
+    from lucy.adapters.tts_openai_compat import OllamaTTS
+
+    assert "hi" in MagpieTTS.capabilities.languages
+    assert getattr(OllamaTTS, "capabilities", None) is None
+
+
+@pytest.mark.parametrize(("voice", "hindi"), [("english", False), ("hindi", True)])
+async def test_the_app_asks_for_hindi_only_when_the_voice_speaks_it(
+    tmp_path: Path, voice: str, hindi: bool
+) -> None:
+    llm = FakeLLM([reply("Hello.")])
+    reg = make_registry(llm)
+    reg.register("tts", "hindi")(HindiVoice)
+    reg.register("tts", "english")(EnglishVoice)
+    settings = with_tts(make_settings(tmp_path / "lucy.db"), voice)
+    async with LucyApp(settings, registry=reg) as app:  # text only: no voice is created
+        await run_turn(app, "Hi")
+    system = llm.calls[0][0].content
+    assert (REPLY_LANGUAGE in system) is hindi
+    assert (ENGLISH_ONLY in system) is not hindi

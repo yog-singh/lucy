@@ -70,3 +70,35 @@ def test_flush_of_whitespace_is_empty() -> None:
     splitter = SentenceSplitter()
     assert splitter.feed("   ") == []
     assert splitter.flush() == []
+
+
+def _split(text: str) -> list[str]:
+    splitter = SentenceSplitter()
+    return splitter.feed(text) + splitter.flush()
+
+
+def test_danda_ends_a_sentence() -> None:
+    text = "आज बारिश हो सकती है। छाता साथ रख लीजिए। ठीक है?"
+    assert _split(text) == ["आज बारिश हो सकती है।", "छाता साथ रख लीजिए।", "ठीक है?"]
+
+
+def test_danda_needs_no_space_after_it() -> None:
+    assert _split("ठीक है।कल मिलते हैं॥ Bye.") == ["ठीक है।", "कल मिलते हैं॥", "Bye."]
+
+
+def test_bengali_danda_and_closing_quote() -> None:
+    assert _split("সে বলল, “ঠিক আছে।” তারপর গেল।") == ["সে বলল, “ঠিক আছে।”", "তারপর গেল।"]
+
+
+@pytest.mark.parametrize("size", [1, 2, 3])
+def test_danda_chunking_does_not_matter(size: int) -> None:
+    text = "ठीक है।” कल।।सुबह मिलते हैं॥ Mixed text, e.g. this one. Done।"
+    splitter = SentenceSplitter()
+    got = [s for i in range(0, len(text), size) for s in splitter.feed(text[i : i + size])]
+    assert got + splitter.flush() == _split(text)
+
+
+def test_a_danda_at_the_end_waits_for_the_next_character() -> None:
+    splitter = SentenceSplitter()
+    assert splitter.feed("ठीक है।") == []
+    assert splitter.feed(" अब") == ["ठीक है।"]

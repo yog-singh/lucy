@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import Final
 
 _TERMINATORS: Final = ".!?"
+_DANDAS: Final = "।॥"
+"""Danda and double danda: the full stop of Hindi, Bengali and other Indic scripts."""
 _CLOSERS: Final = "\"')]”’"
 _OPENERS: Final = "\"'([“‘"
 ABBREVIATIONS: Final[frozenset[str]] = frozenset(
@@ -31,7 +33,9 @@ class SentenceSplitter:
     """Turns a stream of text deltas into complete sentences.
 
     A sentence ends at `.`, `!` or `?` (plus any run of further terminators and
-    closing quotes or brackets) followed by whitespace, or at a newline. A `.`
+    closing quotes or brackets) followed by whitespace, or at a newline. A danda
+    (`।`) or double danda (`॥`) ends one whatever follows it, since neither is used
+    inside a sentence; models usually, but not always, put a space after it. A `.`
     in a number ("3.5") or after a known abbreviation does not end a sentence.
     Because a boundary is only decided once the character after it has arrived,
     the output does not depend on how the text is split into deltas.
@@ -63,12 +67,14 @@ class SentenceSplitter:
             char = buffer[i]
             if char == "\n":
                 return i + 1
-            if char in _TERMINATORS:
+            if char in _TERMINATORS or char in _DANDAS:
                 end = i + 1
-                while end < len(buffer) and buffer[end] in _TERMINATORS + _CLOSERS:
+                while end < len(buffer) and buffer[end] in _TERMINATORS + _DANDAS + _CLOSERS:
                     end += 1
                 if end == len(buffer):
                     return None  # the next character decides; wait for it
+                if any(c in _DANDAS for c in buffer[i:end]):
+                    return end
                 if buffer[end].isspace() and not self._is_abbreviation(i):
                     return end
                 i = end

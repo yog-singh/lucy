@@ -47,7 +47,15 @@ _BULLET: Final = re.compile(r"^\s*(?:[-*+•]|\d+[.)])\s+", re.MULTILINE)
 _QUOTE: Final = re.compile(r"^\s*>\s?", re.MULTILINE)
 _EMPHASIS: Final = re.compile(r"(\*{1,3}|_{2,3}|~~|`+)")
 _TABLE_RULE: Final = re.compile(r"\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?")
-_INVISIBLE: Final = frozenset({"‍", "︎", "️", "⃣"})
+_INVISIBLE: Final = frozenset({"\u200d", "\ufe0e", "\ufe0f", "\u20e3"})
+_JOINERS: Final = frozenset({"\u200c", "\u200d"})
+"""Zero-width non-joiner and joiner: kept between Indic letters, where they change how
+a conjunct is written; a joiner anywhere else (emoji sequences) is dropped."""
+
+
+def _indic(char: str) -> bool:
+    """Whether `char` is in the Indic script blocks (Devanagari to Sinhala)."""
+    return len(char) == 1 and "\u0900" <= char <= "\u0dff"
 
 
 def speakable(text: str) -> str:
@@ -62,7 +70,10 @@ def speakable(text: str) -> str:
     text = _EMPHASIS.sub("", text)
     text = text.replace("|", " ")
     kept = []
-    for char in text:
+    for i, char in enumerate(text):
+        if char in _JOINERS and kept and _indic(kept[-1]) and _indic(text[i + 1 : i + 2]):
+            kept.append(char)  # shapes an Indic conjunct ("क्‍ष"): part of the word
+            continue
         if char in _INVISIBLE:
             continue
         category = unicodedata.category(char)

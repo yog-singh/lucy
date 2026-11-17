@@ -81,6 +81,27 @@ Not measurable without a person at the machine: how each voice sounds, real micr
 - Options: `languages` (default `["en", "hi"]`), `mode` (`mixed`), `latin` (true), `device` (`mps` or `cpu`), `timeout` (20 s per utterance), `start_timeout` (900 s, for the first environment build), and the guard's `min_dbfs` (-55), `max_tokens_per_s` (25), `token_slack` (10), `min_mean_logprob` (-1.0), `max_repeats` (4). Dropped transcripts are logged at info level with the reason and the raw text; the worker's own output is in the debug log.
 - Switching back to Parakeet is one line: `adapter = "parakeet_mlx"`.
 
+## English and Hindi speech: the `magpie` voice
+
+`[tts] adapter = "magpie"` replaces phonon with NVIDIA Magpie TTS Multilingual 357M (Q8_0) on the CPU through NeMo-Speech.cpp 0.3.0, one voice for English and Hindi (ADR 0024). A worker process (`src/lucy/adapters/magpie_worker.py`, standard library only, started with Lucy's own Python) loads the runtime's C library and streams each sentence in 186 ms chunks; the runtime's HTTP server is not used (it returns whole clips).
+
+- Install by hand (no `pip`, no network at run time; NVIDIA's install script is not used because it edits the shell profile). Everything goes in `data/tools/nemo-speech/` (gitignored; delete it to remove):
+  - Runtime: `nemo-speech-0.3.0-macos-aarch64-cpu.tar.gz` and `tn_configs.tar.bz2` from the NeMo-Speech.cpp 0.3.0 GitHub release (github.com/NVIDIA-NeMo/NeMo-Speech.cpp/releases; check them against the release's `SHA256SUMS`). Unpack the first into `cpu/` (so `cpu/lib/libnemo_speech_tts.dylib` exists) and the second into `tn_configs/` (`tn_configs/hi/`, `tn_configs/en/`, ...).
+  - Model: `magpie_tts_multilingual_357m.v2607.q8_0.gguf` from `nvidia/magpie_tts_multilingual_357m` and `nemo_nano_codec_22khz_1.89kbps_21.5fps.decoder.f16.gguf` from `nvidia/nemo-nano-codec-22khz-1.89kbps-21.5fps` (Hugging Face, the GGUF files the runtime's docs name), into `models/`; the tokenizer folder of the Magpie repository into `models/nvidia/magpie_tts_multilingual_357m/<revision>/tokenizer` (the layout `nemo-speech pull` creates). Other paths can be given with the `model`, `codec`, `tokenizer` and `tn` options; a missing file is named in the error.
+  - Exact files (as installed and measured, 2026-11-17; SHA-256 computed on the installed files):
+    - `nemo-speech-0.3.0-macos-aarch64-cpu.tar.gz`: `2c3a7a719b778daeb14f147e011891f16e4b2ac62388d8b8d8b365cc2eebdf15` (matches the release's `SHA256SUMS`).
+    - `tn_configs.tar.bz2` (0.3.0 release; not listed in `SHA256SUMS`): `2ca242c6d29f551eba3663d7e508c0d9dad10440e287628234154c6d1a72c7bc`.
+    - `magpie_tts_multilingual_357m.v2607.q8_0.gguf`, `nvidia/magpie_tts_multilingual_357m` revision `446bff55`: `318c8f8376a28d8fdf3ce99b67b268af843c5128367000245ae30a1398c50cf9`.
+    - `nemo_nano_codec_22khz_1.89kbps_21.5fps.decoder.f16.gguf`, `nvidia/nemo-nano-codec-22khz-1.89kbps-21.5fps` revision `fc00890b`: `cc86d36d821a27cdc1d4ef600a3e2b0dabe76e88fcc2a8652d9543134c07ef2d`.
+    - Tokenizer folder: `nvidia/magpie_tts_multilingual_357m` revision `19806879b16d3f2ccf28fb112b1bcd16a3c7923e`.
+- Language per sentence: `hi-IN` when the sentence contains Devanagari, else `en-US` (`language` forces one). With `hi-IN` Magpie reads Devanagari and digits (times, dates, amounts, percentages are normalised to Hindi words) but spells Latin letters out one by one, so Lucy writes Hindi replies entirely in Devanagari (persona) and the adapter respells any Latin word left inside a Hindi sentence in Devanagari (`lucy.core.devanagari`); a sentence that is mostly Latin goes as English.
+- On screen (`lucy chat`, `lucy voice`, `lucy listen`) the replies' Devanagari is shown in Latin letters (`[display] latin = true`, the default); the conversation is stored as written.
+- Measured (ADR 0024; checks/README.md, tts_listen `light1`): first audio 0.13 to 0.18 s per sentence through the worker on a quiet machine, 0.27 to 0.37 s through the adapter with the chat model loaded; real-time factor about 0.25 to 0.4 with 4 threads; about 1 GB; the chat model keeps its speed. Warm-up loads the model (under a second) and speaks one phrase per language (each language's tokenizer and normaliser load on first use, about 0.5 s).
+- Options: `voice` ("Sofia"; Aria, Jason, John, Leo, Sofia; checked when the worker starts), `threads` (4), `seed` (0: the same sentence sounds the same; null for random), `language`, `timeout` (30 s per sentence), `first_audio_timeout` (5 s), `start_timeout` (60 s), `root` and the path options.
+- Interrupting: the adapter cancels the sentence in the worker, which stops at the next chunk; none of its audio leaks into the next sentence.
+- Licences: NeMo-Speech.cpp Apache-2.0; the Magpie model and the NanoCodec are under the NVIDIA Open Model License.
+- Switching back to phonon is one line: `adapter = "ollama"` (Hindi replies are then Devanagari that phonon cannot read; see ADR 0024).
+
 ## Latency
 
 Estimated from the measurements, from the end of the user's speech to the first audio of the reply:

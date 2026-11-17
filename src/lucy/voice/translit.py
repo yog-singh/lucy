@@ -10,6 +10,8 @@ dropped at the end of a word and between a vowel and a consonant that carries a 
 (schwa deletion, right to left: समझना samajhna, कमरा kamra), nasal marks as n
 (में mein, हैं hain), nukta letters as their Urdu sounds (ज़ z, फ़ f, क़ q). Digits become
 ASCII, the danda a full stop; everything that is not Devanagari passes unchanged.
+English loanwords written in Devanagari (`lucy.core.loanwords`: कैलेंडर, फ्राइडे, टाइम)
+are shown in their English spelling (calendar, Friday, time) instead of "kaileindar".
 The spelling is less idiomatic than a person's ("ke lie", "chaahie"); see
 checks/README.md (stt_accuracy, Latin-only flex) for how it was measured.
 """
@@ -18,6 +20,8 @@ from __future__ import annotations
 
 import re
 import unicodedata
+
+from lucy.core.loanwords import TO_ENGLISH
 
 _VOWELS = {
     "अ": "a", "आ": "aa", "इ": "i", "ई": "ee", "उ": "u", "ऊ": "oo", "ऋ": "ri",
@@ -38,6 +42,9 @@ _CONSONANTS = {
 _NUKTA_FORMS = {"क": "q", "ख": "kh", "ग": "g", "ज": "z", "ड": "r", "ढ": "rh", "फ": "f", "य": "y"}
 _NUKTA, _VIRAMA, _ANUSVARA, _CHANDRABINDU, _VISARGA = "़", "्", "ं", "ँ", "ः"
 _DEVANAGARI = re.compile(r"[ऀ-ॿ]+")
+_ENGLISH = {unicodedata.normalize("NFC", k): v for k, v in TO_ENGLISH.items()}
+"""Loanwords in Devanagari (NFC, as `to_latin` sees them) to their English spelling."""
+_TRAILING_DANDAS = re.compile(r"[।॥]+$")
 
 
 def _word(word: str) -> str:
@@ -105,4 +112,38 @@ def _word(word: str) -> str:
 
 def to_latin(text: str) -> str:
     """`text` with every Devanagari run written in Latin (see the module docstring)."""
-    return _DEVANAGARI.sub(lambda m: _word(m.group()), unicodedata.normalize("NFC", text))
+    return _DEVANAGARI.sub(lambda m: _run(m.group()), unicodedata.normalize("NFC", text))
+
+
+def _run(run: str) -> str:
+    """One Devanagari run: a known loanword in English, anything else through `_word`."""
+    dandas = _TRAILING_DANDAS.search(run)
+    core = run[: dandas.start()] if dandas else run
+    if core in _ENGLISH:
+        return _ENGLISH[core] + ("." * len(dandas.group()) if dandas else "")
+    return _word(run)
+
+
+class StreamingLatin:
+    """`to_latin` for text arriving in pieces (a streamed reply shown on screen): a
+    Devanagari word at the end of a piece is held back until the next piece shows where
+    it ends, so a word split across pieces is still written as one. `flush` at the end."""
+
+    def __init__(self) -> None:
+        self._held = ""
+
+    def feed(self, text: str) -> str:
+        text = self._held + text
+        cut = len(text)
+        while cut and _is_devanagari(text[cut - 1]):
+            cut -= 1
+        self._held = text[cut:]
+        return to_latin(text[:cut])
+
+    def flush(self) -> str:
+        text, self._held = self._held, ""
+        return to_latin(text)
+
+
+def _is_devanagari(char: str) -> bool:
+    return "ऀ" <= char <= "ॿ" and char not in "।॥"

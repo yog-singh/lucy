@@ -168,6 +168,10 @@ class ChatLoop:
                 async with self._floor:
                     text = await self._proactive_turn(service)
                     if text:
+                        if self._app.settings.display.latin:
+                            from lucy.voice.translit import to_latin  # not lucy.voice at import
+
+                            text = to_latin(text)
                         await self._show_above(f"lucy> {text}")
             except asyncio.CancelledError:
                 raise
@@ -248,6 +252,12 @@ class ChatLoop:
                     UserMessage(session_id=self._session_id, text=text, source="text")
                 )
                 self._write("lucy> ")
+                # Replies' Devanagari is shown in Latin letters ([display] latin).
+                latin = None
+                if self._app.settings.display.latin:
+                    from lucy.voice.translit import StreamingLatin  # not lucy.voice at import
+
+                    latin = StreamingLatin()
                 turn_id: str | None = None
                 at_line_start = False
                 started = False
@@ -260,6 +270,8 @@ class ChatLoop:
                         continue
                     if isinstance(event, TextDelta):
                         delta = event.text if started else event.text.lstrip()
+                        if latin is not None:
+                            delta = latin.feed(delta)
                         if delta:
                             started = True
                             self._write(delta)
@@ -271,6 +283,9 @@ class ChatLoop:
                             at_line_start = True
                         self._print_err(tool_marker(event.call))
                     elif isinstance(event, TurnEnded):
+                        if latin is not None and (held := latin.flush()):
+                            self._write(held)
+                            at_line_start = held.endswith("\n")
                         if event.reason == "interrupted":
                             self._write(" [interrupted]\n")
                         elif not at_line_start:

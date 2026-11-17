@@ -203,9 +203,15 @@ class STTCaps(_Frozen):
 
 
 class TTSCaps(_Frozen):
-    """What a TTS adapter supports. A non-streaming TTS is sent whole sentences."""
+    """What a TTS adapter supports. A non-streaming TTS is sent whole sentences.
+
+    `languages` are the reply languages the voice can speak ("en", "hi"): the app
+    asks the chat model for Hindi replies only when the configured voice lists "hi"
+    (Devanagari, ADR 0024). Declare it on the class so it can be read without
+    creating the adapter."""
 
     streaming: bool
+    languages: frozenset[str] = frozenset({"en"})
 
 
 class EmbedderCaps(_Frozen):

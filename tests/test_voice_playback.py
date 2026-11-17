@@ -235,3 +235,22 @@ async def test_adding_after_stop_is_ignored() -> None:
     player.add("Too late.")
     await player.aclose()
     assert tts.started == []
+
+
+def test_speakable_keeps_devanagari_and_bengali() -> None:
+    hindi = "आपकी मीटिंग 21 नवंबर को सुबह 10:15 बजे है।"
+    bengali = "আজ বিকেলে হালকা বৃষ্টি হতে পারে, তাই ছাতা সঙ্গে রাখবেন।"
+    assert speakable(hindi) == hindi
+    assert speakable(bengali) == bengali
+    assert speakable("ठीक है।") == "ठीक है।"  # only Indic letters: not empty
+    assert speakable("बिल ₹1,250 है ✅") == "बिल ₹1,250 है"
+    assert speakable("।") == ""
+
+
+def test_speakable_keeps_joiners_inside_indic_words_only() -> None:
+    zwj, zwnj = "‍", "‌"
+    assert speakable(f"क्{zwj}ष") == f"क्{zwj}ष"
+    assert speakable(f"क्{zwnj}ष") == f"क्{zwnj}ष"
+    assert speakable(f"রক্{zwj}ত") == f"রক্{zwj}ত"
+    assert speakable(f"Family 👨{zwj}👩{zwj}👧 time") == "Family time"
+    assert zwj not in speakable(f"है {zwj}ok")
