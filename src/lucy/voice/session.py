@@ -72,7 +72,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Final, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Final, Literal, Protocol
 
 from lucy.core.bus import EventBus, Subscription
 from lucy.core.config import VoiceSettings
@@ -81,6 +81,7 @@ from lucy.core.events import (
     Event,
     Interrupt,
     PlaybackInterrupted,
+    Seen,
     SentenceReady,
     SpeechActivity,
     TextDelta,
@@ -106,6 +107,9 @@ from lucy.voice.enrol import (
 from lucy.voice.playback import SpeechPlayer
 from lucy.voice.speakers import SpeakerTagger, await_tag
 from lucy.voice.vad import VAD
+
+if TYPE_CHECKING:
+    from lucy.vision.glance import Glancer
 
 logger = logging.getLogger(__name__)
 
@@ -230,6 +234,9 @@ class TurnTimings:
     error: str | None = None
     speaker: str | None = None
     speaker_ready: float | None = None  # when the speaker tag was taken, if in time
+    seen: list[str] | None = None  # names from the glance (ADR 0026), if it was in time
+    seen_unknown: int | None = None  # faces in the glance that matched nobody
+    seen_ready: float | None = None  # when the glance was taken, if in time
 
     def stages(self) -> dict[str, float | None]:
         """Durations of each stage, and end of speech to first audio (`total`)."""
@@ -256,6 +263,7 @@ class TurnTimings:
             "endpoint",
             "transcript_ready",
             "speaker_ready",
+            "seen_ready",
             "first_text_delta",
             "first_sentence",
             "first_tts_audio",
@@ -335,9 +343,11 @@ class VoiceSession:
         wall_clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         speakers: SpeakerTagger | None = None,
         enroller: Enroller | None = None,
+        glancer: Glancer | None = None,
     ) -> None:
         self._bus = bus
         self._speakers = speakers
+        self._glancer = glancer
         self._enroller = enroller
         self._frames: Any = None  # the input's frame iterator, while `run` reads it
         self._enrolling = False
@@ -617,6 +627,8 @@ class VoiceSession:
             if self._speakers is not None
             else None
         )  # concurrently with transcription; see `lucy.voice.speakers`
+        # The glance (ADR 0026, stage 3): one capture and face match, also concurrent.
+        glancing = self._glancer.start() if self._glancer is not None else None
         try:
             try:
                 transcript = await self._stt.transcribe(utterance.audio)
@@ -631,11 +643,20 @@ class VoiceSession:
             if not text:
                 timings.outcome = "no_speech"
                 return
+            waiting_for_glance = (
+                asyncio.ensure_future(_glance_in_time(glancing, self._glancer.wait_s))
+                if glancing is not None and self._glancer is not None
+                else None
+            )  # waited for alongside the speaker tag, each within its own bound
             tag = None
             if tagging is not None and self._speakers is not None:
                 tag = await await_tag(tagging, self._speakers.wait_s)
                 timings.speaker_ready = self._io.now() if tag is not None else None
                 timings.speaker = tag.speaker if tag is not None else None
+            seen = await waiting_for_glance if waiting_for_glance is not None else None
+            if seen is not None:
+                timings.seen_ready = self._io.now()
+                timings.seen, timings.seen_unknown = seen.names, seen.unknown
             show = getattr(self._ui, "user_speaker", None)
             if tag is not None and tag.speaker is not None and show is not None:
                 show(text, tag.speaker)
@@ -651,6 +672,7 @@ class VoiceSession:
                 speaker_score=tag.score if tag is not None else None,
                 audio_path=tag.audio_path if tag is not None else None,
                 audio_s=round(utterance.duration, 3),
+                seen=seen,
             )
             request = await self._converse(message, timings)
             if request is not None:
@@ -1065,3 +1087,13 @@ async def deliver_reminders(
         except Exception:
             logger.exception("could not deliver a reminder")
             await asyncio.sleep(service.poll)
+
+
+async def _glance_in_time(task: asyncio.Task[Seen | None], wait_s: float) -> Seen | None:
+    """The glance if it is ready within `wait_s`; otherwise None. A late glance
+    finishes in the background (the `Glancer` holds it) and is dropped: it is never
+    attached to a later turn."""
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), wait_s)
+    except Exception:  # TimeoutError: late; anything else: it failed
+        return None

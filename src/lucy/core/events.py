@@ -50,6 +50,34 @@ class Event(BaseModel):
 # --- Inbound ------------------------------------------------------------------
 
 
+class SeenFace(BaseModel):
+    """An enrolled person recognised in a glance, with the match's similarity."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: str
+    score: float
+
+
+class Seen(BaseModel):
+    """Who the camera saw in the glance at the start of a voice turn (ADR 0026, stage 3).
+
+    `people` are the recognised, enrolled people; `unknown` counts the faces that
+    matched nobody. No image or embedding is kept. A face match is a tag, never an
+    authorisation: a photo matches like the person, so nothing may gate an action,
+    a tool, a confirmation or memory on it.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    people: tuple[SeenFace, ...] = ()
+    unknown: int = Field(default=0, ge=0)
+
+    @property
+    def names(self) -> list[str]:
+        return [p.name for p in self.people]
+
+
 class UserMessage(Event):
     """The user said or typed something.
 
@@ -71,6 +99,11 @@ class UserMessage(Event):
     """The utterance clip, relative to the workspace, while it is kept."""
     audio_s: float | None = None
     """Length of the utterance audio in seconds (voice only)."""
+    seen: Seen | None = None
+    """Voice only, with `[vision] glance`: who the camera saw as the user finished
+    speaking, or None when no glance ran or it was not ready in time (ADR 0026,
+    stage 3). The chat model is told the names for this turn only. A tag, never an
+    authorisation: memory, confirmations and tools must not act on it."""
 
 
 class Interrupt(Event):

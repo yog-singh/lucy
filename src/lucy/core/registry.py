@@ -11,7 +11,9 @@ import importlib
 from collections.abc import Callable, Iterable
 from typing import Any, Final
 
-PORTS: Final[frozenset[str]] = frozenset({"llm", "stt", "tts", "embedder", "memory", "tool"})
+PORTS: Final[frozenset[str]] = frozenset(
+    {"llm", "stt", "tts", "embedder", "memory", "tool", "camera", "faces"}
+)
 """The valid port names."""
 
 

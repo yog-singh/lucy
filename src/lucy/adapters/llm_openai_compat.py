@@ -34,6 +34,7 @@ times in 15 s and never recovered.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import re
@@ -48,6 +49,7 @@ import httpx
 from lucy.core import registry
 from lucy.core.types import (
     FinishReason,
+    Image,
     LLMCaps,
     LLMChunk,
     Message,
@@ -262,8 +264,20 @@ class _ToolCallAssembler:
 # --- Wire format --------------------------------------------------------------
 
 
+def _image_part(image: Image) -> dict[str, Any]:
+    data = base64.b64encode(image.data).decode("ascii")
+    return {"type": "image_url", "image_url": {"url": f"data:{image.media_type};base64,{data}"}}
+
+
 def _message_to_wire(message: Message) -> dict[str, Any]:
     wire: dict[str, Any] = {"role": message.role.value, "content": message.content}
+    if message.images:
+        # Only messages with images become content parts: every other message keeps
+        # its plain-string form, byte for byte, so the server's prompt cache holds.
+        wire["content"] = [
+            {"type": "text", "text": message.content},
+            *(_image_part(image) for image in message.images),
+        ]
     if message.role is Role.ASSISTANT and message.tool_calls:
         if not message.content:
             wire["content"] = None

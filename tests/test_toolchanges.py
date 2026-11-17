@@ -348,6 +348,6 @@ def test_tool_settings_do_not_matter_for_the_groups(tmp_path: Path) -> None:
     base = make_settings(tmp_path / "lucy.db")
     for dynamic in (True, False):
         s = base.model_copy(
-            update={"tools": ToolsSettings(enabled=["time", "calendar"], dynamic=dynamic)}
+            update={"tools": ToolsSettings(enabled=["time", "look"], dynamic=dynamic)}
         )
-        assert any(g.name == "calendar" for g in tool_groups(s, [Stub("time"), Stub("calendar")]))
+        assert any(g.name == "vision" for g in tool_groups(s, [Stub("time"), Stub("look")]))

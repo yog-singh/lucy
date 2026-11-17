@@ -21,7 +21,7 @@ from typing import Final, Literal, cast
 
 from lucy.core.bus import EventBus
 from lucy.core.confirm import outcome_for, pending_confirmation, unresolved_request
-from lucy.core.context import ContextBuilder, SectionReport
+from lucy.core.context import ContextBuilder, SectionReport, seen_line
 from lucy.core.events import (
     AnyEvent,
     AssistantMessage,
@@ -381,7 +381,14 @@ class Orchestrator:
         window = self._gateway.for_role(self._chat_role).capabilities.context_window
         budget = self._context.token_budgets(window)["memories"]
         memory = await self._memory.retrieve(query=message.text, budget=budget)
-        built = self._context.build(memory=memory, history=history, context_window=window)
+        # The glance's names (ADR 0026, stage 3) are words for this turn's prompt only:
+        # a tag, never an authorisation. Retrieval, confirmations and tools ignore them.
+        built = self._context.build(
+            memory=memory,
+            history=history,
+            context_window=window,
+            turn_note=seen_line(message.seen),
+        )
         turn.context = built.report
         if stale:
             turn.context = [

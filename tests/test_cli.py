@@ -537,3 +537,29 @@ async def test_terminal_reader_prints_above_and_keeps_the_typed_line() -> None:
         pipe.send_text("f\r")
         assert await asyncio.wait_for(line, TIMEOUT) == "half"
     assert "lucy> Reminder: call the bank.\n" in screen.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"), [(["chat"], "cli"), (["chat", "--session", "fresh"], "fresh")]
+)
+def test_chat_session_option_picks_the_conversation(
+    argv: list[str],
+    expected: str,
+    monkeypatch: pytest.MonkeyPatch,
+    restore_logging: None,
+) -> None:
+    from lucy.clients import voice_cli
+
+    # The default is the one voice and listen share, so all three continue one conversation.
+    assert cli.DEFAULT_SESSION == voice_cli.DEFAULT_SESSION == "cli"
+    seen: list[str] = []
+
+    async def fake_chat(settings: object, session_id: str) -> int:
+        seen.append(session_id)
+        return 0
+
+    monkeypatch.setattr(cli, "_load_settings", lambda config: object())
+    monkeypatch.setattr(cli, "_chat", fake_chat)
+    assert cli.main(argv) == 0
+    assert seen == [expected]
+    assert cli._parser().parse_args(["voice", *argv[1:]]).session == expected

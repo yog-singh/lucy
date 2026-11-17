@@ -17,6 +17,7 @@ from lucy.core.trace import TurnTrace
 from lucy.core.types import (
     AudioChunk,
     EmbedderCaps,
+    Image,
     LLMCaps,
     LLMChunk,
     MemoryContext,
@@ -136,6 +137,47 @@ class TTS(Protocol):
     def synthesize(self, text: str) -> AsyncIterator[AudioChunk]:
         """Synthesise `text`. Implementations are async generators, like `LLM.stream`."""
         ...
+
+
+@runtime_checkable
+class Camera(Protocol):
+    """A still camera (ADR 0026). The device is on only while one capture runs."""
+
+    async def capture(self, *, warmup_frames: int | None = None) -> Image:
+        """Take one frame, as a JPEG `Image`. Raises `CameraError` with what the
+        user should do when the camera cannot be used. `warmup_frames`, when given,
+        overrides the adapter's own count of frames discarded first (the glance uses
+        fewer); callers pass it only when they need it."""
+        ...
+
+
+class CameraError(RuntimeError):
+    """The camera could not be used; the message says what the user can do."""
+
+
+@dataclass(frozen=True)
+class DetectedFace:
+    """One face found in an image (ADR 0026, stage 2). `box` is (left, top, right,
+    bottom) as fractions of the image's width and height; `score` the detector's
+    confidence; `embedding` the face's L2-normalised recognition vector."""
+
+    box: tuple[float, float, float, float]
+    score: float
+    embedding: tuple[float, ...]
+
+
+@runtime_checkable
+class FaceRecognizer(Protocol):
+    """Finds faces in an image and embeds each (ADR 0026). Matching the embeddings
+    against enrolled people is Lucy's code (`lucy.vision.faces`), not the adapter's."""
+
+    async def faces(self, image: Image) -> list[DetectedFace]:
+        """Every face found in `image`, largest first. Raises `FaceRecognizerError`."""
+        ...
+
+
+class FaceRecognizerError(RuntimeError):
+    """Faces could not be found: the models are missing or the recogniser failed."""
 
 
 @runtime_checkable

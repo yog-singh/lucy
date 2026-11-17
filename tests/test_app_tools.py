@@ -169,6 +169,9 @@ def test_guidance_names_only_enabled_tools() -> None:
             *REMINDERS,
             "enroll_voice",
             "replace_voice",
+            "look",
+            "enroll_face",
+            "replace_face",
         ],
         confirming=True,
     )
@@ -183,10 +186,22 @@ def test_guidance_names_only_enabled_tools() -> None:
         "you know the user is, else ask."
     )
     both = system_prompt(
-        ["wikipedia", "time", "weather", *CALENDAR, *REMINDERS, "enroll_voice", "replace_voice"],
+        [
+            "wikipedia",
+            "time",
+            "weather",
+            *CALENDAR,
+            *REMINDERS,
+            "enroll_voice",
+            "replace_voice",
+            "look",
+            "enroll_face",
+            "replace_face",
+        ],
         confirming=True,
     )
     assert both == every
+    assert "the look tool" not in system_prompt(["wikipedia", "time", "weather"])
     without_enrolment = system_prompt(["wikipedia", "time", "weather"])
     assert "enroll_voice" not in without_enrolment and "replace_voice" not in without_enrolment
     enrol_only = system_prompt(["enroll_voice"])
