@@ -29,3 +29,7 @@ The chat model is not used for transcription although it accepts audio: it score
 ## Note, 2026-11-17
 
 A second STT adapter, `indic_flex`, runs `bodhan-ai/indic-transcribe-flex` for English and Hindi with Latin output (ADR 0023). PyTorch is still kept out of Lucy's own environment: that model runs in a worker process with its own pinned environment, started with `uv run --script`. Parakeet remains the default.
+
+## Note, 2026-11-17 (TTS)
+
+A second TTS adapter, `magpie`, runs NVIDIA Magpie TTS on the CPU through NeMo-Speech.cpp for English and Hindi (ADR 0024; it replaced a first choice, maya2-native, withdrawn for memory and GPU contention). Like `indic_flex`, it runs in a worker process. `phonon` on Ollama remains the default.

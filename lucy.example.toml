@@ -69,6 +69,19 @@ cache_limit_mb = 256
 adapter = "ollama"
 model   = "phonon"
 voice   = "default"
+# For English and Hindi in one voice: NVIDIA Magpie TTS on the CPU (about 1 GB,
+# no GPU), streamed through NeMo-Speech.cpp in a worker process. Install the
+# runtime and model files by hand under data/tools/nemo-speech/ (docs/voice.md,
+# ADR 0024). Hindi replies are then written in Devanagari ([display] below).
+# adapter  = "magpie"
+# voice    = "Sofia"         # Aria, Jason, John, Leo or Sofia
+# threads  = 4               # CPU threads for synthesis
+# seed     = 0               # same sentence, same audio
+# language = "hi-IN"         # force one; default: hi-IN if the sentence has Devanagari
+# root     = "data/tools/nemo-speech"   # or model, codec, tokenizer, tn paths
+
+# [display]
+# latin = true               # show Devanagari in replies in Latin letters
 
 [voice]
 # Optional; these are the defaults. How `lucy voice` listens.

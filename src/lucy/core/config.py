@@ -737,6 +737,16 @@ class VoiceSettings(BaseModel):
     """Speaker, as for `input_device`."""
 
 
+class DisplaySettings(BaseModel):
+    """How replies are shown in `lucy chat`, `lucy voice` and `lucy listen`."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    latin: bool = True
+    """Show Devanagari in replies in Latin letters (`lucy.voice.translit.to_latin`). The
+    stored conversation and the speech keep the Devanagari the model wrote (ADR 0024)."""
+
+
 class WakeSettings(BaseModel):
     """`lucy listen`: the wake phrase in front of the voice session (see docs/voice.md).
 
@@ -856,6 +866,7 @@ class Settings(BaseModel):
     tools: ToolsSettings = Field(default_factory=ToolsSettings)
     mcp: McpSettings = Field(default_factory=McpSettings)
     voice: VoiceSettings = Field(default_factory=VoiceSettings)
+    display: DisplaySettings = Field(default_factory=DisplaySettings)
     wake: WakeSettings = Field(default_factory=WakeSettings)
     context: ContextSettings = Field(default_factory=ContextSettings)
     residency: ResidencySettings = Field(default_factory=ResidencySettings)

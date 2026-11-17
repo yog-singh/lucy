@@ -297,6 +297,61 @@ $R flex_adapter --compare --eval-dir data/stt_eval/public/noise --label adapter_
 
 Results: English 16.5 % WER (38.1 under 2 s, 43.8 % exact; 0.42 s mean, 1.12 s p95 per clip), the same as `flex_enhi_mixed_latin`; Hindi WERf 6.2 %, CERf 3.4 %, WERu 7.0 % (0.53 s mean); no non-Latin letters; all four silence and noise clips empty (the guard: "REDACTED" and "100000" before). The 1.0 to 1.1 s "Thank you" clips still pass. Timing with the adapter alone (31 English clips, scratch script, not kept): `warm_up` 8.2 s, first utterance after it 0.29 s, then 0.38 s mean, 0.81 s p95; `prepare` after 4 s idle 0.56 s; no worker process left after `aclose` (`pgrep`).
 
+## tts_listen
+
+A listening test for choosing a text-to-speech model for English, Hindi and Bengali (one female voice across languages). It synthesises the 16 short replies in `checks/tts_listen/sentences.json` (English with a time, a name and "Sure."; Hindi in Devanagari with a date, rupees and "ठीक है।"; Hindi with English words in Latin script; two of the Hindi sentences romanised; Bengali) with every candidate and writes a page to listen on.
+
+```
+uv run python checks/tts_listen/run.py --label NAME                       # everything (about 10 minutes)
+uv run python checks/tts_listen/run.py --engines maya --maya-voices Ahana,Vaidehi,Malini,Charvi \
+    --sentences en_name,hi_date,mix_email --no-loaded --no-check --label voices   # quick comparison
+uv run python checks/tts_listen/run.py --page-only --label NAME           # rescore and rewrite the page
+```
+
+- Open `data/checks/tts_listen/NAME/index.html` from disk (Safari works): sentences as rows, one column per model and voice or setting, an audio player per cell with its timings in small print, and a table of per-model facts on top. `results.json` holds every row; the clips are `<column>/<nn>.wav`.
+- Candidates: today's voice, Ollama `phonon` (voice Maeve, English only), through Lucy's own `ollama` TTS adapter; maya2-native as the 8-bit MLX conversion `aruntemme/maya2-native-mlx-8bit` through mlx-audio 0.6.5 (`maya_worker.py`, streaming, its own text normaliser, two voices, `--maya-voices`); `ARTPARK-IISc/DhVaani-0.5` (`dhvaani_worker.py`, CC-BY-NC, gated, cloning the Hindi female reference of its demo Space for every language, `num_step` 16 and 8); `Oomni/mithi-v1-flash` (`mithi_worker.py`, voice Charvi). Each worker is a PEP 723 script under `uv run --script`, so none of their packages enter Lucy's environment, and each loads the reviewed revision of its model from the Hugging Face cache (downloading it the first time; set `HF_HUB_DISABLE_XET=1`). The PyTorch workers use MPS and fall back to the CPU if they fail to start (`--device`).
+- `--engines magpie_adapter` runs Magpie through Lucy's own streaming `magpie` TTS adapter (ADR 0024), column `magpie_adapter`. (A `maya_adapter` engine ran the withdrawn `maya2` adapter. `tag_compare.py`, which compared maya2's `hi` and `en` tags, needed that adapter and was deleted; its result is in ADR 0024.)
+- Timing per sentence: time to first audio (the first streamed chunk for phonon and maya2, the whole clip for the others), total time, audio length and real-time factor, after one discarded warm-up sentence. Per model: load time, download size, the worker's peak resident size and its GPU memory (MLX peak, or the MPS driver's allocation). Then five sentences are timed again with the chat model (`--chat-model`, default `gemma4:12b-mlx`) loaded in Ollama by a one-token request with a 10-minute keep-alive; it is unloaded again before the next engine. `--no-loaded` skips this.
+- Machine check (`--no-check` skips it): every clip except Bengali is transcribed by Lucy's own recognisers through the registry (Parakeet for English, `indic_flex` in Latin script for Hindi, mixed and romanised Hindi) and scored against the input (WER; for Hindi, romanised and folded, WER and CER). It flags gross failures only (`dropped`, `repeated`, `garbled`; see `report.flags`), not quality: numbers spoken as words in Hindi and spelling variants of romanised Hindi raise WER without anything being wrong, so read the "heard" line.
+
+### light1: lightweight voices (2026-11-17)
+
+```
+HF_HUB_DISABLE_XET=1 uv run python checks/tts_listen/run.py --engines supertonic,magpie,magpie_metal,maya \
+    --maya-voices Ahana --set light1 --generating --label light1          # about 25 minutes
+```
+
+- `--set light1` takes the 26 sentences tagged `light1` in `sentences.json`: six English (time, name, temperature, "Sure.", "Sounds good.", a 28-word sentence) and ten Hindi or mixed sentences, each in Devanagari (English words in Latin letters) and romanised (`same_as`): plain Hindi, mixed, 7:30, 18 November, 1250 rupees, 32 degrees and 40%, "हाँ।"/"Haan.", "ठीक है।"/"Theek hai.", Dario Amodei, and a 25-word sentence.
+- `magpie` / `magpie_metal`: `nvidia/magpie_tts_multilingual_357m` v2607 Q8_0 GGUF with the NanoCodec decoder under NeMo-Speech.cpp 0.3.0 (`nemo-speech serve` as a child process, `/v1/audio/speech`, raw PCM at 22.05 kHz, `language` `en-US` or `hi-IN`, Sparrowhawk text normalisation from the release's `tn_configs`). The binaries and models are not installed by the check: they live in `data/tools/nemo-speech/` (`cpu/`, `metal/`, `models/`, `tn_configs/`), from the NVIDIA GitHub release (SHA-256 checked) and the Hugging Face files (LFS SHA-256 checked); delete that folder to remove them. The route returns the whole clip, so first audio is total time.
+- `supertonic`: `supertonic_worker.py`, the `supertonic` 1.3.1 package over onnxruntime 1.23.2 (CPU provider), Supertonic 3 at the revision the package pins, files in `data/tools/supertonic3/`; 44.1 kHz, whole clip, no number normaliser. Voices F1 and F2.
+- `--generating`: after the loaded phase, the first voice of each engine synthesises 8 sentences (`GEN_IDS`) back to back while Ollama streams a long answer from the chat model; it reports underruns (waits when the sentences are played back to back as soon as each is ready: between sentences, not between chunks) and the chat model's tokens per second in 5-second windows before and after and during the synthesis. The generation can end on its own before the "after" window, which then reads low or 0.
+- All clips on the page were resampled to 24 kHz after the run.
+
+Results (the page is `data/checks/tts_listen/light1/index.html`; one run; another agent's work may have loaded the machine):
+
+| | Supertonic F1/F2 | Magpie CPU Sofia/Aria | Magpie Metal Sofia | maya2 Ahana |
+|---|---|---|---|---|
+| Median total time, quiet | 0.79 / 0.76 s | 1.79 / 1.50 s | 1.85 s | 1.42 s (first chunk 0.18 s) |
+| Median real-time factor, quiet | 0.18 / 0.17 | 0.31 / 0.30 | 0.34 | 0.41 |
+| Load | 0.3 s | 1.5 s | 20 s | 2.3 s |
+| Memory, threads | 598 MB RSS, 27 threads | 1031 MB RSS, 7 threads | 1190 MB RSS, 11 threads | 3.8 GB (3.7 GB MLX) |
+| Chat model loaded, median total | 0.79 -> 0.98 s | 1.88 -> 1.69 s | 1.88 -> 1.94 s | 1.73 -> 1.73 s |
+| Generating: underruns; median RTF | 0; 0.20 | 0; 0.40 | 0; 0.64 | 0; 0.45 |
+| Chat model tokens/s before -> during | 48 -> 35 | 46 -> 44 | 42 -> 31 | 50 -> 29 |
+
+- Magpie with `hi-IN` reads Devanagari Hindi, digits (TN: 1250, 7:30, 32, 40) and Devanagari-transliterated English words cleanly, but spells out Latin-script words letter by letter: every romanised sentence and most English words inside Devanagari sentences ("M-E-E-T-I-N-G", "N-O-V-E-M-B-E-R"). Romanised Hindi with `en-US` is read as English words. A follow-up (`light1/followup/`) with the English words written in Devanagari ("मीटिंग", "कैलेंडर", "फ्राइडे") was transcribed exactly.
+- Supertonic reads English and Devanagari Hindi words well but misreads digits in Hindi (1250 -> "25" or "200", 7:30 -> "6:30" or "7", 18 -> "5th" or "8th", 32 degrees -> "6.25"); with the numbers written as Hindi words they were transcribed correctly. Romanised one- and two-word replies ("Theek hai.", "Haan." with F1) came out wrong; one romanised sentence with F2 gave an empty transcript.
+- maya2 had no gross failure in either script.
+
+### roman_fallback: romanised Hindi replies through the voice (2026-11-17)
+
+```
+uv run python checks/tts_listen/roman_fallback.py [--rows ROWS.json ...] [--limit N]
+```
+
+- Takes every Latin-script sentence that `latin_language` judges Hindi from the Hindi and mixed replies in `data/checks/reply_language/*/rows.json` (or the rows given), synthesises it through the `magpie` adapter with the fallback on (converted by `romanised_to_devanagari`, sent as `hi-IN`) and off (as written, `en-US`), transcribes both with `indic_flex` through the registry (Latin output) and scores word errors against the romanised original after the `stt_accuracy` spelling fold. Writes `rows.json`, the WAVs and a listening page, `data/checks/tts_listen/roman_fallback/index.html` (converted and unconverted side by side, what was heard, and the model's Devanagari reply to the same question where a run had one). Lucy's recogniser understanding the speech is not the same as it sounding natural: listen.
+- 2026-11-17, 102 sentences (1,469 words) from the `devanagari` and `final` rows and a quiet baseline run of reply_language, machine otherwise idle: word error 11.8% with the fallback against 47.5% without; heard exactly 22 against 1. Without it Magpie reads the Hindi as English words ("Kao Kaa Calendar Yihai" for "Kal ka calendar ye hai", digits as English numbers); with it the errors left are mostly spelling the fold does not absorb (thori/thoda, Dr./doctor) and words the rules respell badly (chance as चैंसे). Worse with the fallback in 3 of 102 sentences.
+
 ## calendar_live
 
 A smoke test of the calendar tools on this Mac's real calendar, with no model: it creates one event, "Lucy test event - safe to delete", on Wednesday 12 June 2030, lists it, edits it (title, moved a day with its length kept, a place), deletes it, and checks each step against the store, printing every question and result. It touches only the event it created, and deletes that event if a step fails. It writes to the real calendar, so it does nothing without `--write`; it does not take the common options.
@@ -310,3 +365,34 @@ uv run python checks/calendar_live/calendar_live.py --write [--calendar NAME]
 - Checks what the fake store cannot: that EventKit keeps the event's identifier after an edit, that the new title, times and place are saved, and that removal works. It does not cover all-day or repeating events.
 
 Not run yet.
+
+## reply_language
+
+Whether Lucy replies in the language of the user's latest message (English, romanised Hindi or a mix), and since 2026-11-17 whether Hindi replies are in Devanagari (ADR 0024). 25 short scripted conversations (36 turns: English, Hindi and mixed questions, switches each way, "haan", "theek hai", "ok", "thanks", tool requests in Hindi whose results are in English, a delete that ends in the code's English confirmation question), each in a fresh session through the real app, prompt assembly, gateway and model. Tools are those enabled in the config: `wikipedia`, `web_search`, `fetch_page` and `weather` return fixed text (the searches always find nothing, so fact questions can loop to the step limit), the calendar tools use the fake store from `tests/test_tools_calendar.py`, and `time` and the reminder tools are real (reminders go to the check's database). Pass a config with `[mcp] enabled = []`, `[speakers] enabled = false` and `[learning] enabled = false`. Since 2026-11-17 the Hindi paragraph is only in the prompt when the config's `[tts]` voice speaks Hindi (`magpie`); with the default `lucy.example.toml` (phonon) the check tests the English-only paragraph.
+
+```
+uv run python checks/reply_language/reply_language.py --config CONFIG --reps 2
+uv run python checks/reply_language/reply_language.py --config CONFIG --reps 1 --cases hi_weather,hi_confirm   # smoke run
+uv run python checks/reply_language/reply_language.py --summarise data/checks/reply_language/LABEL/rows.json ...
+```
+
+- Takes about 5 to 6 minutes at `--reps 2`. Rows go to `data/checks/reply_language/LABEL/rows.json`; `--summarise` re-scores rows files with the current scorer and prints their totals.
+- Each turn's flag shows `L` (wrong language), `T` (expected tool not called, or a tool where none was expected), `S` (wrong script: Devanagari in an English reply, or a Hindi reply mostly in Latin letters; the line also shows the Latin words left in a Devanagari reply), `E` (empty reply) and `R` (silent-stream retries or fallback, counted from the gateway's warnings). A turn where only the code spoke (the confirmation question) has no language score.
+- Language (`scoring.py`): the share of words from a list of common romanised Hindi words; 0.15 or more is Hindi, under 0.05 English, a mixed message accepts either Hindi or in between. It cannot judge the quality of the Hindi, is noisy on one- or two-word replies, and counts English nouns in Hindi sentences as English: read the replies. Tests: `tests/test_check_reply_language.py`.
+
+Baselines, 2026-11-17, `--reps 2` (72 turns, 70 with a language score):
+
+| Persona | Language ok | English | Hindi | Mixed | Devanagari | Tool ok | Empty | Retries | English words (mean) |
+|---|---|---|---|---|---|---|---|---|---|
+| no language passage | 63 | 28/30 | 32/36 | 3/4 | 0 | 54/64 | 2 | 7 | 19.8 |
+| first wording ("The user speaks English, Hindi or a mix...") | 60 | 22/30 | 34/36 | 4/4 | 0 | 56/64 | 0 | 21 | 24.4 |
+| committed wording | 64 | 28/30 | 33/36 | 3/4 | 0 | 58/64 | 2 | 2 | 21.0 |
+| final: tool-free wording of the lookup sentence, example "kal ka plan kya hai", English dates for tools (`final`) | 64 | 27/30 | 33/36 | 4/4 | 0 | 57/64 | 2 | 2 | 22.6 |
+
+Quiet baseline and two wording rounds (2026-11-17, `--reps 2`, magpie voice, nothing else running; 72 turns): baseline (the committed Devanagari paragraph) language 65/71 (English 25/30, Hindi 36/37, mixed 4/4), script for Hindi and mixed 31/41, tool 59/64, empty 3, retries 19; round 1 (adds "never write Hindi in Latin letters, not even a short reply or one that repeats the user's words" and one example pair) English 23/30, Hindi script 34/40, empty 3, retries 19; round 2 (same, with the English sentence moved to the end: "whatever was said or looked up before") English 24/30, Hindi script 34/40, empty 0, retries 16. Both rounds made the model answer English questions in Hindi after a lookup (reminder and weather: 2 and 3 turns, none in the baseline), so the baseline wording stays and the romanised replies left are handled by the voice's fallback (`roman_fallback` above). Romanised replies were mostly first turns with no lookup whose question carried English words or names ("Japan ki capital kya hai?", "Chai peena sehat ...", "Mujhe neend nahi aa rahi") and the follow-up "haan" in that conversation; replies after a lookup were nearly always Devanagari.
+
+Devanagari persona (2026-11-17, `--reps 1`, 36 turns, 35 scored; another agent shared the chat model): language 30/35 (English 12/15, Hindi 16/18, mixed 2/2), script 25/33 (English 12/13, Hindi and mixed 13/20), Latin words per Devanagari reply 0.77 (2 of 13: English event titles from the calendar), tool 31/32, empty 2, retries 7, errors 4 (silent streams). The `final` rows re-scored: script for Hindi 0/40.
+
+The first wording made Lucy answer English questions in Hindi (weather, calendar, time, sleep tips), so it was replaced. The two English failures in each run are the same empty turns ("Is green tea healthy?" searching until the step limit on the always-empty stand-ins). Hindi failures with the committed wording: "thanks" after Hindi turns answered "You're welcome." (both reps), and once a reminder request in Hindi answered in English after the reminder tool refused "kal subah 7:30 baje" (the date parsers know only English words).
+
+With the final wording the Hindi reminder ("Kal subah 7:30 baje mujhe yaad dila dena ...") was passed as `when: "tomorrow 7:30 am"` and set in both reps; once the reply after it was English ("The reminder is set for Wednesday, November 18, at 7:30 am."). The calendar cases passed `start: "tomorrow"` and `"this Friday 4pm"`. The other changes against the committed wording are within run-to-run variation: one more needless lookup ("Japan ki capital kya hai?"), and an English failure where "haan" after the empty green-tea turn got a Hindi answer. Each row now also holds `calls`: every tool call's arguments and the first 200 characters of its result, printed under the turn.

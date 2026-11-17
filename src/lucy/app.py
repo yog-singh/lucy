@@ -89,12 +89,12 @@ from lucy.core.ports import (
     TraceSink,
     tool_spec,
 )
-from lucy.core.registry import Registry
+from lucy.core.registry import Registry, RegistryError
 from lucy.core.reminders import REMINDER_TIMER, ReminderService, TimerHandler
 from lucy.core.residency import Residency
 from lucy.core.toolsets import META_TOOL, ToolGroup, ToolSelector, keyword_words
 from lucy.core.trace import TurnTrace
-from lucy.core.types import MemoryContext, Risk, ToolSpec
+from lucy.core.types import MemoryContext, Risk, ToolSpec, TTSCaps
 from lucy.memory.decay import DecayPolicy
 from lucy.memory.extraction import (
     DEFAULT_TRANSIENT_ERRORS,
@@ -139,6 +139,7 @@ BUILTIN_ADAPTER_MODULES: Final = (
     "lucy.adapters.stt_parakeet_mlx",  # imports MLX only when a model is loaded
     "lucy.adapters.stt_indic_flex",  # its model runs in a worker process (ADR 0023)
     "lucy.adapters.tts_openai_compat",
+    "lucy.adapters.tts_magpie",  # its model runs in a worker process (ADR 0024)
 )
 """Modules imported at startup so their adapters register themselves."""
 
@@ -180,9 +181,14 @@ def system_prompt(
     *,
     confirming: bool | None = None,
     extra_guidance: Sequence[str] = (),
+    hindi: bool = True,
 ) -> str:
     """The fixed part of the system prompt: the persona, plus the tool guidance
     (`prompts/tools.md`) when any tool is enabled.
+
+    `hindi` is whether Hindi replies (in Devanagari) are wanted: when false, the
+    persona's reply-language paragraph is replaced by `prompts/language_en.md`
+    (reply in English; the voice cannot speak Hindi). See `voice_speaks_hindi`.
 
     `tools` is whether tools are enabled, or the names of the enabled tools: then a
     guidance sentence about "the weather tool" (any "the NAME tool") is left out when
@@ -198,6 +204,11 @@ def system_prompt(
     tool as "the NAME tool" and is kept only while that tool is enabled.
     """
     persona = load_prompt("persona").strip()
+    if not hindi:
+        persona = "\n\n".join(
+            load_prompt("language_en").strip() if p.startswith(_REPLY_LANGUAGE) else p
+            for p in persona.split("\n\n")
+        )
     if not tools:
         return persona
     guidance = load_prompt("tools").strip()
@@ -219,6 +230,28 @@ def system_prompt(
         ]
         guidance = "\n\n".join(p for p in paragraphs if p)
     return f"{persona}\n\n{guidance}"
+
+
+_REPLY_LANGUAGE: Final = "Reply in the language of the user's latest message"
+
+
+def voice_speaks_hindi(settings: Settings, registry: Registry | None = None) -> bool:
+    """Whether Lucy may reply in Hindi: true without a `[tts]` section (text only),
+    else whether the configured TTS adapter's class declares "hi" in its
+    `capabilities.languages`. Decided from the configuration for every client, voice
+    or text, so a conversation continued in `lucy chat` and `lucy voice` gets the same
+    instruction and the prompt prefix stays fixed. An adapter class without class-level
+    capabilities (the Ollama/phonon voice), or one not registered, counts as English
+    only (an unknown adapter fails later, when `lucy voice` creates it)."""
+    if settings.tts is None:
+        return True
+    get = registry.get if registry is not None else _registry.get
+    try:
+        cls = get("tts", settings.tts.adapter)
+    except RegistryError:
+        return False
+    caps = getattr(cls, "capabilities", None)
+    return isinstance(caps, TTSCaps) and "hi" in caps.languages
 
 
 def _guidance_sentences(extra_guidance: Sequence[str]) -> list[list[str]]:
@@ -633,6 +666,7 @@ class LucyApp:
                     else [*selector.core, META_TOOL],
                     confirming=any(t.risk == Risk.DANGEROUS for t in self._tools),
                     extra_guidance=extra_guidance,
+                    hindi=voice_speaks_hindi(self.settings, self._registry),
                 ),
                 clock=lambda: clock().astimezone(),
                 layout=self.settings.context.layout,

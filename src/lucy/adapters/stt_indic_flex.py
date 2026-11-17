@@ -25,26 +25,27 @@ variables are set and no token is passed. The worker's stderr goes to Lucy's deb
 from __future__ import annotations
 
 import asyncio
-import atexit
 import base64
-import contextlib
 import json
 import logging
 import math
-import os
 import queue
-import shutil
-import signal
-import subprocess
-import threading
 import time
-import weakref
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Final
 
 from lucy.adapters.stt_indic_flex_guard import Guard, collapse_repeats, junk_reason
+from lucy.adapters.worker_process import (
+    ENV_KEEP,
+    STOP_GRACE,
+    WorkerGone,
+    WorkerProcess,
+    find_uv,
+    worker_environment,
+)
+from lucy.adapters.worker_process import stop_all as _stop_all
 from lucy.core import registry
 from lucy.core.types import (
     INPUT_CHANNELS,
@@ -72,49 +73,14 @@ SILENCE_DBFS: Final = -60.0
 """Audio whose RMS level is below this is not sent to the worker."""
 PREPARE_AFTER: Final = 3.0
 """`prepare` does nothing if the worker was used less than this many seconds ago."""
-STOP_GRACE: Final = 3.0
-"""Seconds the worker gets to exit after its stdin closes, before it is killed."""
-ENV_KEEP: Final = (
-    "PATH",
-    "HOME",
-    "USER",
-    "LOGNAME",
-    "LANG",
-    "LC_ALL",
-    "LC_CTYPE",
-    "TMPDIR",
-    "SSL_CERT_FILE",
-    "SSL_CERT_DIR",
-    "HF_HOME",
-    "HF_HUB_CACHE",
-    "HUGGINGFACE_HUB_CACHE",
-    "XDG_CACHE_HOME",
-)
-"""Variables passed to the worker (plus any `UV_*`); everything else is left out."""
+__all__ = ["ENV_KEEP", "STOP_GRACE", "IndicFlexSTT", "STTError", "_stop_all", "find_uv"]
 
 
 class STTError(RuntimeError):
     """The speech recogniser could not be started or failed on an utterance."""
 
 
-class _WorkerGone(Exception):
-    """The worker exited (or its pipe broke) during a request."""
-
-
-def find_uv() -> str | None:
-    """The `uv` executable: `$UV` (set by `uv run`), then PATH, then the usual places."""
-    candidates = [os.environ.get("UV"), shutil.which("uv")]
-    home = Path.home()
-    candidates += [
-        str(home / ".local" / "bin" / "uv"),
-        str(home / ".cargo" / "bin" / "uv"),
-        "/opt/homebrew/bin/uv",
-        "/usr/local/bin/uv",
-    ]
-    for c in candidates:
-        if c and os.path.isfile(c) and os.access(c, os.X_OK):
-            return c
-    return None
+_WorkerGone = WorkerGone
 
 
 def _model_cached(model: str, revision: str) -> bool:
@@ -130,54 +96,13 @@ def _model_cached(model: str, revision: str) -> bool:
 
 # --- The worker process -------------------------------------------------------------
 
-_LIVE: weakref.WeakSet[_Worker] = weakref.WeakSet()
 
-
-@atexit.register
-def _stop_all() -> None:
-    for worker in list(_LIVE):
-        worker.kill()
-
-
-class _Worker:
-    """One running worker process: its pipes, a stdout reader and a stderr pump."""
+class _Worker(WorkerProcess):
+    """The worker process with its replies in a queue, read one at a time."""
 
     def __init__(self, command: Sequence[str], env: dict[str, str]) -> None:
-        self.proc = subprocess.Popen(
-            list(command),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=env,
-            start_new_session=True,  # its own process group, so uv's child goes too
-        )
         self.lines: queue.Queue[bytes] = queue.Queue()
-        _LIVE.add(self)
-        threading.Thread(target=self._read, name="lucy-stt-worker-out", daemon=True).start()
-        threading.Thread(target=self._pump, name="lucy-stt-worker-err", daemon=True).start()
-
-    def _read(self) -> None:
-        assert self.proc.stdout is not None
-        with contextlib.suppress(OSError, ValueError):
-            for line in self.proc.stdout:
-                self.lines.put(line)
-        self.lines.put(b"")  # end of file
-
-    def _pump(self) -> None:
-        assert self.proc.stderr is not None
-        with contextlib.suppress(OSError, ValueError):
-            for raw in self.proc.stderr:
-                text = raw.decode("utf-8", "replace").strip()[:500]
-                if text:
-                    logger.debug("[stt worker] %s", text)
-
-    def send(self, obj: dict[str, Any]) -> None:
-        assert self.proc.stdin is not None
-        try:
-            self.proc.stdin.write(json.dumps(obj).encode() + b"\n")
-            self.proc.stdin.flush()
-        except (BrokenPipeError, OSError, ValueError) as exc:
-            raise _WorkerGone(f"cannot write to the worker: {type(exc).__name__}") from None
+        super().__init__(command, env, self.lines.put, name="stt worker", log=logger)
 
     def receive(self, timeout: float) -> dict[str, Any] | None:
         """The next JSON line, or None on timeout; raises `_WorkerGone` at end of file."""
@@ -200,45 +125,6 @@ class _Worker:
                 return json.loads(line)
             except json.JSONDecodeError:
                 logger.debug("[stt worker stdout] %s", line[:200].decode("utf-8", "replace"))
-
-    def alive(self) -> bool:
-        return self.proc.poll() is None
-
-    def stop(self, grace: float = STOP_GRACE) -> None:
-        """Close stdin, wait up to `grace` seconds, then stop the whole process group."""
-        with contextlib.suppress(OSError, ValueError):
-            if self.proc.stdin is not None:
-                self.proc.stdin.close()
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            self.proc.wait(timeout=grace)
-        self.kill()
-
-    def kill(self) -> None:
-        """SIGTERM then SIGKILL the worker's process group (never Lucy's)."""
-        pgid = self.proc.pid  # a session leader: its group id is its pid
-        for sig in (signal.SIGTERM, signal.SIGKILL):
-            if not _group_alive(pgid):
-                break
-            with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.killpg(pgid, sig)
-            deadline = time.monotonic() + 1.0
-            while _group_alive(pgid) and time.monotonic() < deadline:
-                time.sleep(0.01)
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            self.proc.wait(timeout=1.0)
-        _LIVE.discard(self)
-
-
-def _group_alive(pgid: int) -> bool:
-    if pgid == os.getpgrp():
-        return False
-    try:
-        os.killpg(pgid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
 
 
 # --- The adapter ---------------------------------------------------------------------
@@ -338,15 +224,8 @@ class IndicFlexSTT:
         return args
 
     def _environment(self) -> dict[str, str]:
-        env = {k: v for k, v in os.environ.items() if k in ENV_KEEP or k.startswith("UV_")}
-        env.update(PYTHONUNBUFFERED="1", HF_HUB_DISABLE_TELEMETRY="1", TOKENIZERS_PARALLELISM="0")
-        if self._command is None and _model_cached(self.model, self.revision):
-            env.update(HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1")
-        else:  # a download may be needed: the token, if any, goes to the worker only
-            for key in ("HF_TOKEN", "HF_TOKEN_PATH"):
-                if key in os.environ:
-                    env[key] = os.environ[key]
-        return env
+        offline = self._command is None and _model_cached(self.model, self.revision)
+        return worker_environment(offline=offline, TOKENIZERS_PARALLELISM="0")
 
     def _start_blocking(self) -> _Worker:
         if self._worker is not None and self._worker.alive():

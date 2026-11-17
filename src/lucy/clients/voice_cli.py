@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from lucy.core.registry import Registry
     from lucy.voice.audio import AudioIO
     from lucy.voice.session import VoiceState
+    from lucy.voice.translit import StreamingLatin
 
 logger = logging.getLogger(__name__)
 
@@ -161,8 +162,10 @@ def timings_path(settings: Settings) -> Path:
 class TerminalUI:
     """Prints the conversation to `out`, and a state indicator to `err` if `show_state`."""
 
-    def __init__(self, out: TextIO, err: TextIO, *, show_state: bool) -> None:
+    def __init__(self, out: TextIO, err: TextIO, *, show_state: bool, latin: bool = True) -> None:
         self._out = out
+        self._latin = latin  # replies' Devanagari shown in Latin letters
+        self._translit: StreamingLatin | None = None
         self._err = err
         self._show_state = show_state
         self._line_open = False
@@ -206,6 +209,15 @@ class TerminalUI:
         self._draw()
 
     def reply_delta(self, text: str) -> None:
+        if self._latin:
+            if self._translit is None:
+                from lucy.voice.translit import StreamingLatin
+
+                self._translit = StreamingLatin()
+            text = self._translit.feed(text)
+        self._show_reply(text)
+
+    def _show_reply(self, text: str) -> None:
         if not self._line_open:
             text = text.lstrip()
             if not text:
@@ -216,6 +228,9 @@ class TerminalUI:
         self._write(text)
 
     def reply_end(self, outcome: str, error: str | None) -> None:
+        if self._translit is not None:
+            held, self._translit = self._translit.flush(), None
+            self._show_reply(held)
         self._clear()
         if outcome == "interrupted":
             self._write(" [interrupted]\n" if self._line_open else "lucy> [interrupted]\n")
@@ -355,7 +370,7 @@ async def _converse(
     from lucy.clients.speakers_cli import build_enroller, build_tagger
     from lucy.voice.session import VoiceConfig, VoiceSession, deliver_reminders
 
-    ui = TerminalUI(out, err, show_state=interactive)
+    ui = TerminalUI(out, err, show_state=interactive, latin=app.settings.display.latin)
     tagger = build_tagger(app.settings, lambda m: print(f"lucy voice: {m}", file=err))
     session = VoiceSession(
         bus=app.bus,
@@ -538,7 +553,7 @@ async def run_listen(
     except ValueError as exc:
         print(f"lucy listen: {exc}", file=err)
         return 2
-    ui = TerminalUI(out, err, show_state=interactive)
+    ui = TerminalUI(out, err, show_state=interactive, latin=settings.display.latin)
     app: LucyApp | None = None
     reminders: asyncio.Task[None] | None = None
     early = _early_reminders(settings)  # before the first wake: the store alone
