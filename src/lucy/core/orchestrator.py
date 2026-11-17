@@ -45,7 +45,8 @@ from lucy.core.ports import ConfirmableTool, MemoryStore, Tool, TraceSink, tool_
 from lucy.core.privacy import guard_question, guarded, needs_guard, visible_private_sources
 from lucy.core.reminders import TimerHandler
 from lucy.core.sentences import SentenceSplitter
-from lucy.core.toolsets import ToolSelector
+from lucy.core.toolchanges import ToolChanges
+from lucy.core.toolsets import ToolGroup, ToolSelector
 from lucy.core.trace import StepTrace, TurnTrace
 from lucy.core.types import (
     FinishReason,
@@ -176,6 +177,13 @@ class Orchestrator:
     `more_tools` meta tool and the groups that are on (`ToolSelector.groups_on`,
     from the log, plus groups asked for or used earlier in the turn); any
     configured tool still runs when called. Without one, every tool every step.
+
+    Tool changes (ADR 0025, amendment 2026-11-17): before a turn's user message, a
+    `ToolsConfigured` record of all configured tool names is logged (not published)
+    when the latest one in the window differs or there is none. Earlier exchanges
+    that a newly configured tool in one of `tool_groups` made stale are left out of
+    the prompt history (`lucy.core.toolchanges`), here and in `next_turn_prefix`;
+    the trace's context report counts them as `stale_exchanges`.
     """
 
     def __init__(
@@ -193,6 +201,7 @@ class Orchestrator:
         confirm_timeout: float = 60.0,
         timer_handlers: Mapping[str, TimerHandler] | None = None,
         selector: ToolSelector | None = None,
+        tool_groups: Sequence[ToolGroup] = (),
     ) -> None:
         if max_steps < 1:
             raise ValueError("max_steps must be at least 1")
@@ -210,6 +219,8 @@ class Orchestrator:
                 raise ValueError(f"dangerous tool {tool.name!r} has no preview to confirm with")
             self._tools[tool.name] = tool
         self._tool_specs = [tool_spec(tool) for tool in tools]
+        # Which tools are configured, recorded in the log; stale exchanges left out.
+        self._tool_changes = ToolChanges([tool.name for tool in tools], tool_groups)
         # Dynamic tool loading (ADR 0025): None offers every tool on every step.
         self._selector = selector if selector is not None and selector.active else None
         if self._selector is not None:
@@ -260,8 +271,12 @@ class Orchestrator:
         episodes = await self._memory.recent_episodes(session_id, self._history_limit)
         if not episodes:
             return None
+        # As the turn will log them: a tool record, if due, then the user message.
+        record = self._tool_changes.record(episodes, session_id, None)
         placeholder = UserMessage(session_id=session_id, text="")
-        history = events_to_messages([*episodes, placeholder][-self._history_limit :])
+        coming = [*episodes, *([record] if record else []), placeholder][-self._history_limit :]
+        kept, _ = self._tool_changes.leave_out_stale(coming)
+        history = events_to_messages(kept)
         window = self._gateway.for_role(self._chat_role).capabilities.context_window
         budget = self._context.token_budgets(window)["memories"]
         query = next((e.text for e in reversed(episodes) if isinstance(e, UserMessage)), "")
@@ -270,7 +285,7 @@ class Orchestrator:
         return PromptPrefix(
             role=self._chat_role,
             messages=self._context.prefix_messages(built),
-            tools=self._offered([*episodes, placeholder][-self._history_limit :]),
+            tools=self._offered(coming),
         )
 
     def _offered(self, episodes: Sequence[AnyEvent], extra: Sequence[str] = ()) -> list[ToolSpec]:
@@ -350,18 +365,29 @@ class Orchestrator:
             await self._record_trace(turn, outcome, error)
 
     async def _turn_body(self, turn: _Turn, message: UserMessage) -> tuple[Outcome, str | None]:
+        # Before the user message, so the exchange is judged by the tools it had.
+        earlier = await self._memory.recent_episodes(turn.session_id, self._history_limit)
+        record = self._tool_changes.record(earlier, turn.session_id, turn.turn_id)
+        if record is not None:
+            await self._memory.append_episode(record)  # never published (ADR 0025)
         await self._memory.append_episode(message.model_copy(update={"turn_id": turn.turn_id}))
 
         episodes = await self._memory.recent_episodes(turn.session_id, self._history_limit)
         # Decided before any LLM call, from the log alone (ADR 0006).
         request = pending_confirmation(episodes, message)
         answered = await self._resolve(turn, request, episodes, message) if request else []
-        history = events_to_messages(episodes)
+        kept, stale = self._tool_changes.leave_out_stale(episodes)
+        history = events_to_messages(kept)
         window = self._gateway.for_role(self._chat_role).capabilities.context_window
         budget = self._context.token_budgets(window)["memories"]
         memory = await self._memory.retrieve(query=message.text, budget=budget)
         built = self._context.build(memory=memory, history=history, context_window=window)
         turn.context = built.report
+        if stale:
+            turn.context = [
+                *built.report,
+                SectionReport(name="stale_exchanges", tokens=0, included=0, dropped=stale),
+            ]
         messages = [*built.messages, *answered]
         switched_on: set[str] = set()
         if self._selector is not None and answered:

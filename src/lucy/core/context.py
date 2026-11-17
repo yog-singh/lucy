@@ -37,7 +37,11 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from lucy.core.types import MemoryContext, Message, Role
 
-SectionName = Literal["persona", "profile", "instructions", "memories", "history"]
+SectionName = Literal[
+    "persona", "profile", "instructions", "memories", "history", "stale_exchanges"
+]
+"""`stale_exchanges` is added by the orchestrator: earlier exchanges left out of the
+history because a newly configured tool made them stale (`lucy.core.toolchanges`)."""
 
 ContextLayout = Literal["system", "stable_prefix"]
 """How the sections are arranged; see the module docstring."""

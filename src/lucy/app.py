@@ -685,6 +685,8 @@ class LucyApp:
                 confirm_timeout=self.settings.tools.confirm_timeout,
                 timer_handlers=timer_handlers,
                 selector=selector,
+                # Built whether or not tools are dynamic: they judge stale exchanges.
+                tool_groups=tool_groups(self.settings, self._tools),
             )
             self._run_task = asyncio.create_task(self._orchestrator.run(), name="lucy-orchestrator")
             self._start_residency(self._orchestrator)

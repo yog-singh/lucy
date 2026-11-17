@@ -17,6 +17,7 @@ from lucy.core.events import (
     SentenceReady,
     TextDelta,
     ToolFinished,
+    ToolsConfigured,
     ToolStarted,
     TurnEnded,
     UserMessage,
@@ -169,6 +170,8 @@ def summary(event: Event) -> tuple[str, ...]:
             return (event.type, c.name, q)
         case ConfirmationResolved(outcome=o):
             return (event.type, o)
+        case ToolsConfigured(names=n):
+            return (event.type, ",".join(n))
     raise AssertionError(event)
 
 
@@ -213,6 +216,7 @@ async def test_tool_result_is_fed_back_to_the_llm() -> None:
         ("turn_ended", "completed", ""),
     ]
     assert h.persisted() == [
+        ("tools_configured", "echo"),  # never published: not among `events`
         ("user_message", "echo ping"),
         ("assistant_message", "", "echo", ""),
         ("tool_started", "echo"),
