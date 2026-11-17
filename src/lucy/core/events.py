@@ -204,6 +204,25 @@ class TurnEnded(Event):
     error: str | None = None
 
 
+# --- Records ------------------------------------------------------------------
+
+
+class ToolsConfigured(Event):
+    """The names of the tools the orchestrator was configured with, from this point
+    of the log on (ADR 0025, amendment 2026-11-17).
+
+    Written at the start of a turn, before its `UserMessage`, when the session's
+    latest record in the window of history differs or there is none: all configured
+    tools, not the subset offered on a step. Persisted, never published on the bus,
+    and never a message: history, memory extraction and clients ignore it. Used to
+    leave out of the prompt exchanges that a newly configured tool made stale
+    (`lucy.core.toolchanges`).
+    """
+
+    type: Literal["tools_configured"] = "tools_configured"
+    names: tuple[str, ...]
+
+
 # --- Transient ----------------------------------------------------------------
 
 
@@ -240,6 +259,8 @@ OUTBOUND_EVENTS: tuple[type[Event], ...] = (
     ConfirmationResolved,
     TurnEnded,
 )
+RECORD_EVENTS: tuple[type[Event], ...] = (ToolsConfigured,)
+"""Persisted bookkeeping: never published, never part of the conversation."""
 
 AnyEvent = Annotated[
     UserMessage
@@ -254,7 +275,8 @@ AnyEvent = Annotated[
     | AssistantMessage
     | ConfirmationRequested
     | ConfirmationResolved
-    | TurnEnded,
+    | TurnEnded
+    | ToolsConfigured,
     Field(discriminator="type"),
 ]
 """Any concrete event, discriminated by its `type` field."""

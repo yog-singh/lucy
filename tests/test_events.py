@@ -7,6 +7,7 @@ from pydantic import ValidationError
 from lucy.core.events import (
     INBOUND_EVENTS,
     OUTBOUND_EVENTS,
+    RECORD_EVENTS,
     AssistantMessage,
     ClientConnected,
     ConfirmationRequested,
@@ -18,6 +19,7 @@ from lucy.core.events import (
     TextDelta,
     TimerFired,
     ToolFinished,
+    ToolsConfigured,
     ToolStarted,
     TurnEnded,
     UserMessage,
@@ -56,11 +58,12 @@ SAMPLES: list[Event] = [
     ),
     ConfirmationResolved(session_id="s", turn_id="t2", request_id="r1", outcome="declined"),
     TurnEnded(session_id="s", turn_id="t1", reason="error", error="boom"),
+    ToolsConfigured(session_id="s", turn_id="t3", names=("time", "look")),
 ]
 
 
 def test_samples_cover_every_event_type() -> None:
-    assert {type(e) for e in SAMPLES} == set(INBOUND_EVENTS + OUTBOUND_EVENTS)
+    assert {type(e) for e in SAMPLES} == set(INBOUND_EVENTS + OUTBOUND_EVENTS + RECORD_EVENTS)
 
 
 @pytest.mark.parametrize("event", SAMPLES, ids=lambda e: type(e).__name__)
@@ -71,7 +74,9 @@ def test_round_trip_through_json(event: Event) -> None:
 
 
 def test_type_discriminators_are_unique() -> None:
-    types = [cls.model_fields["type"].default for cls in INBOUND_EVENTS + OUTBOUND_EVENTS]
+    types = [
+        cls.model_fields["type"].default for cls in INBOUND_EVENTS + OUTBOUND_EVENTS + RECORD_EVENTS
+    ]
     assert len(set(types)) == len(types)
 
 

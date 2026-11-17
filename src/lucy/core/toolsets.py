@@ -90,7 +90,8 @@ class MoreTools:
         )
 
 
-def _pattern(keywords: Iterable[str]) -> re.Pattern[str] | None:
+def keyword_pattern(keywords: Iterable[str]) -> re.Pattern[str] | None:
+    """A pattern finding any of `keywords` as whole words in lower-cased text, or None."""
     words = sorted({" ".join(k.lower().split()) for k in keywords if k.strip()}, key=len)
     if not words:
         return None
@@ -148,7 +149,7 @@ class ToolSelector:
         self._keep_turns = keep_turns
         self._guidance = dict(guidance or {})
         self._use_keywords = keywords
-        self._patterns = {g.name: _pattern(g.keywords) for g in declared.values()}
+        self._patterns = {g.name: keyword_pattern(g.keywords) for g in declared.values()}
         self.meta = MoreTools(self._groups)
 
     # --- What is configured -----------------------------------------------------
