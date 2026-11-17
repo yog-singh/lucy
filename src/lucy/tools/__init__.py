@@ -28,6 +28,7 @@ import httpx
 from lucy.core.config import Settings
 from lucy.core.ports import Tool
 from lucy.core.reminders import ReminderStore
+from lucy.core.toolsets import ToolGroup
 from lucy.tools.calendar_changes import DeleteCalendarEventTool, EditCalendarEventTool
 from lucy.tools.calendar_events import AddCalendarEventTool, CalendarTool
 from lucy.tools.fetch_page import FetchPageTool
@@ -133,3 +134,54 @@ _REMINDER_CLASSES: Final = {
     "set_timer": SetTimerTool,
     "cancel_reminder": CancelReminderTool,
 }
+
+
+# Tool groups for dynamic tool loading (ADR 0025): each built-in tool's group, the
+# one line the model is told about it, and the words (English and romanised Hindi)
+# in a user message that offer it. `DEFAULT_CORE` are offered on every turn.
+GROUPS: Final[tuple[ToolGroup, ...]] = (
+    ToolGroup(
+        "lookups",
+        "Wikipedia, web search and reading a web page",
+        ("wikipedia", "web_search", "fetch_page"),
+        ("wikipedia", "search", "google", "look up", "web", "internet", "online", "news",
+         "website", "page", "dhundh", "dhoondh", "khabar", "samachar"),
+    ),
+    ToolGroup(
+        "time_weather",
+        "the time anywhere and weather forecasts",
+        ("time", "weather"),
+        ("time", "weather", "forecast", "temperature", "rain", "raining", "sunny", "snow",
+         "mausam", "baarish", "barish", "garmi", "thand", "samay", "kitne baje", "time zone"),
+    ),
+    ToolGroup(
+        "calendar",
+        "the user's calendar: what is on, free time, adding, changing or deleting events",
+        ("calendar", "add_calendar_event", "edit_calendar_event", "delete_calendar_event"),
+        ("calendar", "meeting", "meetings", "appointment", "appointments", "event", "events",
+         "schedule", "scheduled", "agenda", "am i free", "are you free", "busy", "free on",
+         "free at", "free tomorrow", "free today", "diary", "booked", "reschedule", "move my",
+         "cancel my", "invite", "got on", "have on", "plans", "pencil in", "free hoon", "free hu",
+         "free hain", "free rahunga", "free rahungi", "khali", "mulakat", "mulaqat", "milna hai",
+         "program hai"),
+    ),
+    ToolGroup(
+        "reminders",
+        "reminders and timers: listing, setting and cancelling them",
+        ("reminders", "set_reminder", "set_timer", "cancel_reminder"),
+        ("remind", "reminder", "reminders", "timer", "timers", "alarm", "countdown",
+         "yaad dila", "yaad dilana", "yaad dilao", "yaad kara", "yaad karana", "timer laga",
+         "alarm laga", "minute baad", "minutes baad", "ghante baad", "nudge", "ping me", "wake me",
+         "wake up", "don't let me forget", "utha dena", "utha do", "uthana", "jaga dena",
+         "jaga do", "jagana"),
+    ),
+    ToolGroup(
+        "voice",
+        "voice enrolment: learning or re-recording a person's voice",
+        ("enroll_voice", "replace_voice"),
+        ("enrol", "enroll", "enrolment", "enrollment", "voice", "voices", "recognise", "recognize",
+         "awaaz", "aawaz", "awaz", "pehchan", "pehchaan", "pehchano"),
+    ),
+)  # fmt: skip
+
+DEFAULT_CORE: Final = ("wikipedia", "web_search", "fetch_page", "time", "weather")

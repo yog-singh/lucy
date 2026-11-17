@@ -361,3 +361,46 @@ def test_prefix_messages_need_the_stable_prefix_layout() -> None:
         builder.prefix_messages(built)
     with pytest.raises(ValueError):
         stable().prefix_messages(built.model_copy(update={"messages": built.messages[:1]}))
+
+
+def test_history_tokens_caps_earlier_history_whatever_the_window() -> None:
+    history = [
+        user("one two three"),  # 3
+        assistant("four five"),  # 2
+        user("six"),  # 1
+        assistant("seven eight"),  # 2
+        user("now " * 50),  # the latest: not counted against the cap
+    ]
+    builder = system_builder("p", count_tokens=words, history_tokens=3)
+    built = builder.build(memory=MemoryContext(), history=history, context_window=100_000)
+    assert built.messages[1:] == history[2:]
+    assert by_name(built.report)["history"].dropped == 2
+
+
+def test_history_cap_keeps_the_prefix_the_pre_fill_saw() -> None:
+    """The residency pre-fill builds with an empty placeholder user message; the turn
+    that follows has real text. Both must keep the same earlier messages."""
+    call = ToolCall(id="c1", name="t", arguments={})
+    earlier = [
+        user("a b c d"),
+        assistant("e f g h"),
+        user("look it up"),
+        Message(role=Role.ASSISTANT, content="", tool_calls=[call]),
+        Message(role=Role.TOOL, content="x " * 6, tool_call_id="c1"),
+        assistant("found it"),
+    ]
+    builder = ContextBuilder("p", count_tokens=words, history_tokens=14)
+    pre = builder.build(memory=MemoryContext(), history=[*earlier, user("")], context_window=10**6)
+    turn = builder.build(
+        memory=MemoryContext(), history=[*earlier, user("w " * 40)], context_window=10**6
+    )
+    assert builder.prefix_messages(pre) == builder.prefix_messages(turn)
+    assert builder.prefix_messages(turn)[1:] == earlier[2:]
+
+
+def test_no_history_cap_by_default() -> None:
+    history = [user("x " * 100), assistant("y " * 100), user("z")]
+    built = system_builder("p", count_tokens=words).build(
+        memory=MemoryContext(), history=history, context_window=10_000
+    )
+    assert built.messages[1:] == history

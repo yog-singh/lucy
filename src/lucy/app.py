@@ -60,6 +60,7 @@ only switches learning off (logged), leaving plain chat.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from collections.abc import Callable, Collection, Mapping, Sequence
@@ -72,18 +73,28 @@ from lucy.adapters.embed_openai_compat import EmbedderError
 from lucy.adapters.llm_openai_compat import LLMError
 from lucy.core import registry as _registry
 from lucy.core.bus import EventBus, Subscription
-from lucy.core.config import DEFAULT_MEMORY, Settings
-from lucy.core.context import ContextBuilder
+from lucy.core.config import DEFAULT_MEMORY, McpServerSettings, Settings
+from lucy.core.context import ContextBuilder, estimate_tokens
 from lucy.core.events import TurnEnded
 from lucy.core.gateway import LLMGateway, Preempted, add_fallbacks
 from lucy.core.jobs import Handler, Job, JobRunner, JobStatus, utc_now
 from lucy.core.orchestrator import Orchestrator
-from lucy.core.ports import STT, TTS, Embedder, MemoryStore, Tool, ToolProvider, TraceSink
+from lucy.core.ports import (
+    STT,
+    TTS,
+    Embedder,
+    MemoryStore,
+    Tool,
+    ToolProvider,
+    TraceSink,
+    tool_spec,
+)
 from lucy.core.registry import Registry
 from lucy.core.reminders import REMINDER_TIMER, ReminderService, TimerHandler
 from lucy.core.residency import Residency
+from lucy.core.toolsets import META_TOOL, ToolGroup, ToolSelector, keyword_words
 from lucy.core.trace import TurnTrace
-from lucy.core.types import MemoryContext, Risk
+from lucy.core.types import MemoryContext, Risk, ToolSpec
 from lucy.memory.decay import DecayPolicy
 from lucy.memory.extraction import (
     DEFAULT_TRANSIENT_ERRORS,
@@ -115,7 +126,7 @@ from lucy.memory.sqlite_jobs import SQLiteJobStore
 from lucy.memory.sqlite_reminders import SQLiteReminderStore
 from lucy.memory.sqlite_store import SQLiteMemoryStore
 from lucy.prompts import load_prompt
-from lucy.tools import build_tools
+from lucy.tools import DEFAULT_CORE, GROUPS, build_tools
 from lucy.tools.reminders import REMINDER_TOOLS, build_store, local_announcement
 from lucy.tools.voice_enrolment import ENROL_TOOLS, ENROLMENT_TIMER, handle_enrolment
 
@@ -208,6 +219,86 @@ def system_prompt(
         ]
         guidance = "\n\n".join(p for p in paragraphs if p)
     return f"{persona}\n\n{guidance}"
+
+
+def _guidance_sentences(extra_guidance: Sequence[str]) -> list[list[str]]:
+    guidance = load_prompt("tools").strip()
+    if extra_guidance:
+        guidance += "\n\n" + " ".join(" ".join(s.split()) for s in extra_guidance)
+    return [re.split(r"(?<=[.!?])\s+", paragraph) for paragraph in guidance.split("\n\n")]
+
+
+def group_guidance(
+    groups: Mapping[str, ToolGroup], core: Collection[str], extra_guidance: Sequence[str] = ()
+) -> dict[str, str]:
+    """The guidance sentences that `system_prompt(core)` leaves out, by tool group
+    (ADR 0025): a sentence goes to the group whose tools, with the core ones, cover
+    every tool it names. A sentence naming tools of two groups is left out."""
+    found: dict[str, list[str]] = {}
+    always = set(core)
+    for paragraph in _guidance_sentences(extra_guidance):
+        for sentence in paragraph:
+            named = set(_NAMED_TOOL.findall(sentence))
+            if not named or named <= always:
+                continue
+            for name, group in groups.items():
+                if named <= always | set(group.tools):
+                    found.setdefault(name, []).append(sentence)
+                    break
+    return {name: " ".join(sentences) for name, sentences in found.items()}
+
+
+def tool_groups(settings: Settings, tools: Sequence[Tool]) -> list[ToolGroup]:
+    """The groups of `tools` (ADR 0025): the built-in ones (`lucy.tools.GROUPS`), then
+    one per MCP server, or per `group` its settings name."""
+    groups = list(GROUPS)
+    mcp: dict[str, list[str]] = {}
+    configs: dict[str, McpServerSettings] = {}
+    for tool in tools:
+        server = getattr(tool, "server", None)
+        if isinstance(server, str) and server in settings.mcp.servers:
+            config = settings.mcp.servers[server]
+            name = config.group or server
+            mcp.setdefault(name, []).append(tool.name)
+            configs.setdefault(name, config)
+    for name, names in mcp.items():
+        config = configs[name]
+        existing = next((i for i, g in enumerate(groups) if g.name == name), None)
+        if existing is not None:  # MCP tools added to a built-in group
+            g = groups[existing]
+            groups[existing] = ToolGroup(
+                g.name, g.description, (*g.tools, *names), (*g.keywords, *config.group_keywords)
+            )
+            continue
+        keywords = tuple(config.group_keywords) or keyword_words(name, *names)
+        groups.append(
+            ToolGroup(name, config.group_description or f"tools of {name}", tuple(names), keywords)
+        )
+    return groups
+
+
+def build_selector(
+    settings: Settings, tools: Sequence[Tool], extra_guidance: Sequence[str] = ()
+) -> ToolSelector | None:
+    """The tool selector for `[tools] dynamic` (ADR 0025), or None when it is off or
+    every configured tool is core."""
+    if not settings.tools.dynamic or not tools:
+        return None
+    names = {t.name for t in tools}
+    core = settings.tools.core
+    if core is None:
+        core = [n for n in DEFAULT_CORE if n in names]
+    groups = tool_groups(settings, tools)
+    probe = ToolSelector(tools, groups, core=core, keep_turns=settings.tools.keep_turns)
+    if not probe.active:
+        return None
+    return ToolSelector(
+        tools,
+        groups,
+        core=core,
+        keep_turns=settings.tools.keep_turns,
+        guidance=group_guidance(probe.groups, [*probe.core, META_TOOL], extra_guidance),
+    )
 
 
 @dataclass(frozen=True)
@@ -534,15 +625,22 @@ class LucyApp:
                     tool.voice_client = self._speech  # type: ignore[attr-defined]
             if ENROL_TOOLS & {t.name for t in self._tools}:
                 timer_handlers[ENROLMENT_TIMER] = handle_enrolment
+            selector = build_selector(self.settings, self._tools, extra_guidance)
             context = ContextBuilder(
                 system_prompt(
-                    [t.name for t in self._tools],
+                    [t.name for t in self._tools]
+                    if selector is None
+                    else [*selector.core, META_TOOL],
                     confirming=any(t.risk == Risk.DANGEROUS for t in self._tools),
                     extra_guidance=extra_guidance,
                 ),
                 clock=lambda: clock().astimezone(),
                 layout=self.settings.context.layout,
+                history_tokens=self.settings.context.history_tokens,
             )
+            # With dynamic tools, the turn after a quiet spell offers only the core set.
+            offered = self._tools if selector is None else selector.specs(())
+            _warn_long_prefix(context, offered, self.settings.context.history_tokens)
             self._orchestrator = Orchestrator(
                 bus=self._bus,
                 gateway=self._gateway,
@@ -552,6 +650,7 @@ class LucyApp:
                 trace=trace,
                 confirm_timeout=self.settings.tools.confirm_timeout,
                 timer_handlers=timer_handlers,
+                selector=selector,
             )
             self._run_task = asyncio.create_task(self._orchestrator.run(), name="lucy-orchestrator")
             self._start_residency(self._orchestrator)
@@ -880,6 +979,42 @@ class LucyApp:
         tb: TracebackType | None,
     ) -> None:
         await self.stop()
+
+
+PREFIX_WARN_TOKENS: Final = 4500
+"""Estimated prompt prefix (system prompt, tool specifications, history cap) above
+which startup warns: about 5 s of pre-fill at the 850 tokens/s measured with
+gemma4:12b-mlx, so the residency re-warm may not finish before the next
+utterance (ADR 0017)."""
+
+
+def prefix_estimate(
+    persona: str, tools: Sequence[Tool | ToolSpec], history_tokens: int | None
+) -> int:
+    """Estimated tokens of the prompt before the latest user message, at most."""
+    specs = sum(
+        estimate_tokens(json.dumps((t if isinstance(t, ToolSpec) else tool_spec(t)).model_dump()))
+        for t in tools
+    )
+    return estimate_tokens(persona) + specs + (history_tokens or 0)
+
+
+def _warn_long_prefix(
+    context: ContextBuilder, tools: Sequence[Tool | ToolSpec], history_tokens: int | None
+) -> None:
+    estimate = prefix_estimate(context.persona, tools, history_tokens)
+    if estimate > PREFIX_WARN_TOKENS:
+        logger.warning(
+            "the chat prompt's prefix is about %d tokens (system prompt and %d tool "
+            "specifications, plus up to %s of history); pre-filling it after the model "
+            "is reloaded takes about %.0f s, so a quick next turn may wait for it. "
+            "Fewer tools, `fixed` MCP arguments or a smaller [context] history_tokens "
+            "shorten it.",
+            estimate,
+            len(tools),
+            "no limit" if history_tokens is None else history_tokens,
+            estimate / 850,
+        )
 
 
 async def _warm_up(component: Any) -> None:

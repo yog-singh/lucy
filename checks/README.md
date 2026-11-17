@@ -60,6 +60,40 @@ uv run python checks/tool_choice/choice.py --turns 3   # smoke run
 
 Baselines: 2026-11-13, 25 and 24 of 25 with the `system` layout, 25 and 25 with `stable_prefix`; 25 of 25 with model unloads forced to happen. Earlier, on 2026-11-12, the GGUF build of the model scored 24 of 25 against 25 of 25 for the MLX build.
 
+### Dynamic tool loading (`dynamic.py`)
+
+Tool choice with `[tools] dynamic` on and off (ADR 0025). 46 scripted conversations (60 turns), each in a fresh session, through the real app, prompt assembly, gateway and chat model, with the config's enabled tools and MCP servers all replaced by stubs: real name, description, parameters, risk and grouping, fixed results, and a fixed preview for dangerous ones so confirmations are asked as usual. Nothing is looked up, added, set or read; MCP tools come from the lock file and no server starts. Learning and speaker recognition are off; the database is fresh.
+
+```
+uv run python checks/tool_choice/dynamic.py --config lucy.toml --out DIR --label dyn --dynamic --reps 2
+uv run python checks/tool_choice/dynamic.py --config lucy.toml --out DIR --label off --static --reps 2
+uv run python checks/tool_choice/dynamic.py --summarise DIR/dyn/rows.json DIR/off/rows.json
+```
+
+- Takes about 5 minutes per mode at 2 repetitions. `--cases a,b` picks cases, `--keep-turns` and `--core` override the config.
+- Categories: `core` (weather, time, web, Wikipedia), `keyword` (calendar, reminders, email, voice with a keyword in the message), `no-keyword` (the same needs worded so that, before the 2026-11-17 keyword additions, no keyword matched: only `more_tools` reached them), `hindi` (romanised Hindi), `follow-up` (second turn with the group already on), `expired` (a follow-up after five filler turns, so the group has dropped), `confirm` (delete and move after a listing, then "yes"), `no-tool`, `cannot` (pizza, lights, sending email, music).
+- Each turn is `correct` (an expected tool, arguments matching the case's regex), `wrong_args`, `wrong`, `missing` or `needless`; `more_tools` calls are counted as needed (the group was off and it named it), needless, wrong group and repeated; also extra model steps, empty replies, retries (silent-stream warnings and fallbacks), errors, median time to first token and total turn time. Each row records the groups on before the turn and which keywords matched, so a "no-keyword" case that now matches a keyword is visible. Rows go to `DIR/LABEL/rows.json`.
+- Known flaws: the stubs' web results are vague, so the web case loops on searches (both modes). The cases run back to back in different sessions, so with the feature on a case usually starts with a different offered set from the previous one and pays a full pre-fill: the first-token times are a worst case for dynamic, a best case for static.
+
+Results, 2026-11-17, `gemma4:12b-mlx`, thinking off, user's `lucy.toml` (15 built-in tools, 3 Gmail tools), 2 repetitions each (120 turns). Baseline: `--static` run, with the 9 calendar cases re-run after the calendar stub was changed to return only Wednesday's events (the first stub listed Friday's too, so "And on Friday?" could be answered from history). The persona's language passage changed during the runs (other work); an A/B of the Hindi cases at the same time gave 18 of 18 in both modes and the same 10 of 18 replies in Devanagari, so the Devanagari count is not caused by the feature.
+
+| category | turns | off | on, as built | on, after fixes |
+|---|---|---|---|---|
+| core | 12 | 12 | 12 | 12 |
+| keyword | 16 | 16 | 15 (1 error) | 16 |
+| no-keyword | 18 | 18 | 14 (14 `more_tools`, all needed) | 16 (4 `more_tools`) |
+| hindi | 14 | 13 | 11 | 14 |
+| follow-up | 12 | 11 | 9 | 11 |
+| expired | 14 | 14 | 12 | 14 |
+| confirm | 12 | 10 | 10 | 9 |
+| no-tool | 14 | 10 | 10 | 10 |
+| cannot | 8 | 6 | 6 | 6 (2 needless `more_tools`) |
+| all | 120 | 110 | 99 | 108 |
+| retries / errors | | 11 / 2 | 25 / 1 | 5 / 0 |
+| median first token / turn | | 1.31 s / 2.06 s | 2.63 s / 3.46 s | 1.75 s / 2.91 s |
+
+"On, as built" used the first calendar stub, so its follow-up and expired rows are not comparable. No `more_tools` call named a wrong group or was repeated, and none was made in a no-tool turn. Failing in both modes: Wikipedia for "capital of Japan" and "why is the sky blue" (4 needless), searching mail for "send an email to Ana" (2), the model asking its own "are you sure?" before a delete or move (2 off, 3 on). Still worse with the feature on after the fixes: "recognise my brother Ravi" (voice now switched on by keyword, but the model asked "What is Ravi's name?" instead of calling `enroll_voice`, 2 of 2; off: 2 of 2 correct) and one "delete the workout" answered "I've removed the workout" with no call.
+
 ## endings
 
 18 turns in one session through the real app (greetings, small talk, a joke, a conversation about space, short facts, thanks, an ambiguous "tell me more about him") that in real use drew closing offers of help and follow-up menus. Classifies the last sentence of each reply with regexes as `offer` (O), `menu` (M, "would you like to know more...", "anything else you'd like to..."), another question (`?`) or no question (`.`); `*` marks turns where a question is fine (greetings, the ambiguous request, the open topic turns). `uv run python checks/endings/endings.py` (about 1 minute; database in `data/checks/endings/LABEL/`). The regexes are rough: read the replies, not only the counts.

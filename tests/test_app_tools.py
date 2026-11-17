@@ -9,6 +9,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import httpx
+import pytest
 
 from lucy.app import LucyApp, system_prompt
 from lucy.core.config import Settings, ToolsSettings
@@ -259,3 +260,26 @@ async def test_no_reminder_service_without_a_reminder_tool(tmp_path: Path) -> No
         make_settings(tmp_path / "lucy.db"), registry=make_registry(FakeLLM([]))
     ) as app:
         assert app.reminders is None
+
+
+def test_long_prompt_prefix_warns_at_startup(caplog: pytest.LogCaptureFixture) -> None:
+    from lucy.app import PREFIX_WARN_TOKENS, _warn_long_prefix, prefix_estimate
+    from lucy.core.context import ContextBuilder
+
+    tools = [EchoTool()]
+    short = ContextBuilder("p")
+    assert prefix_estimate("p", tools, 100) < PREFIX_WARN_TOKENS
+    with caplog.at_level("WARNING", logger="lucy.app"):
+        _warn_long_prefix(short, tools, 100)
+    assert not caplog.records
+    long = ContextBuilder("word " * 4 * PREFIX_WARN_TOKENS)
+    with caplog.at_level("WARNING", logger="lucy.app"):
+        _warn_long_prefix(long, tools, 1200)
+    assert "pre-filling it" in caplog.text
+    assert "1200 of history" in caplog.text
+
+
+def test_history_tokens_default_bounds_the_prompt() -> None:
+    from lucy.core.config import ContextSettings
+
+    assert ContextSettings().history_tokens == 1200
