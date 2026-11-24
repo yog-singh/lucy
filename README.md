@@ -112,6 +112,17 @@ uv run lucy listen                     # say "hey jarvis, what's the weather in 
 - Half-duplex as in `lucy voice`: while she thinks or speaks the microphone, including the wake word, is ignored; Enter stops her, Ctrl-C quits.
 - `[wake]` in `lucy.example.toml` sets the phrase, model, threshold (0.5), follow-up window and chimes. File mode (`--input-wav`, `--output-wav`, `--fast`, `--wait-for-reply`) works as for `lucy voice`.
 
+A personal wake phrase ("hey lucy" by default) can be trained from your own voice, on top of the same mel and embedding models (fetch them first with `lucy listen --download-models`):
+
+```sh
+uv run lucy wakeword record                # 80 takes of "hey lucy", 2 s each; vary distance, loudness and speed
+uv run lucy wakeword record --negative     # 10 min of everyday talk, TV or music without the phrase
+uv run lucy wakeword train                 # trains data/models/wakeword/hey_lucy.npz, prints the [wake] lines
+uv run lucy wakeword test                  # live scores, to tune the threshold
+```
+
+Recordings go to `data/wakeword/hey_lucy/` (`--phrase` for another phrase; any 16 kHz-convertible WAV dropped into `negative/` is used too). `train` prints a table of held-out takes detected and false wakes per hour at each threshold, and the `[wake]` lines to put in `lucy.toml`. It is tuned to your voice but is not speaker verification; see ADR 0028.
+
 Speaker tagging (optional, off by default): `lucy speakers download`, `lucy speakers enroll NAME clip.wav...`, `lucy speakers list | remove NAME | identify FILE`, then `[speakers] enabled = true`. Voice turns then record who spoke; see docs/voice.md and ADR 0021. With `enroll_voice` and `replace_voice` in `[tools] enabled`, you can also say "enrol my voice" in `lucy voice` or `lucy listen`.
 
 ## Memory commands
