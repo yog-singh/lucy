@@ -15,6 +15,11 @@ CC BY-NC-SA 4.0 (non-commercial use only). `download_models` fetches them from
 openWakeWord's GitHub release into `data/models/wakeword/` and checks each
 against the SHA-256 pinned here (`lucy listen --download-models`).
 
+A phrase model ending in `.npz` is a `NumpyHead` instead of an ONNX classifier:
+a small numpy network trained on the user's own recordings by `lucy wakeword train`
+(`lucy.voice.wakeword_train`, ADR 0028). `clip_embeddings` computes the same
+embeddings as the streaming path for a whole clip at once, for training.
+
 `ScriptedWakeWord` is the test double, as `ScriptedVAD` is for the VAD.
 """
 
@@ -69,6 +74,10 @@ _EMBEDDING_WINDOW: Final = 76  # mel frames per embedding
 _EMBEDDING_DIM: Final = 96
 _WARMUP_PREDICTIONS: Final = 5  # zeroed after a reset, as openWakeWord does
 _SEED_SAMPLES: Final = 16000 * 4
+CLIP_FIRST_STEP: Final = 10
+"""`clip_embeddings(...)[j]` is the embedding the streaming detector computes at step
+`j + CLIP_FIRST_STEP`, whose newest sample is `STEP_SAMPLES * (j + CLIP_FIRST_STEP)`."""
+HEAD_FORMAT: Final = 1
 
 
 @runtime_checkable
@@ -93,6 +102,126 @@ def missing_models(model: Path) -> list[Path]:
     model, and the mel and embedding models beside it."""
     needed = [model, model.parent / MEL_MODEL.name, model.parent / EMBEDDING_MODEL.name]
     return [path for path in needed if not path.is_file()]
+
+
+def open_session(path: str | Path, *, threads: int = 1) -> Any:
+    """An onnxruntime CPU session (one thread unless `threads` says otherwise)."""
+    import onnxruntime as ort
+
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = threads
+    options.inter_op_num_threads = 1
+    options.log_severity_level = 3
+    return ort.InferenceSession(str(path), options, providers=["CPUExecutionProvider"])
+
+
+def melspectrogram(session: Any, samples: Any) -> Any:
+    """Mel frames (n, 32) of int16-valued float32 `samples`, scaled as openWakeWord does."""
+    import numpy as np
+
+    output = session.run(None, {"input": samples[None, :].astype(np.float32)})[0]
+    return np.squeeze(output).reshape(-1, _MEL_BINS) / 10.0 + 2.0
+
+
+def embeddings(session: Any, windows: Any) -> Any:
+    """The 96-dim embeddings (n, 96) of mel windows (n, 76, 32), in one call."""
+    import numpy as np
+
+    batch = np.asarray(windows, dtype=np.float32)[:, :, :, None]
+    return session.run(None, {"input_1": batch})[0].reshape(-1, _EMBEDDING_DIM)
+
+
+def clip_embeddings(mel: Any, embed: Any, samples: Any, *, batch: int = 512) -> Any:
+    """Embeddings (n, 96) of a whole clip of int16-valued float32 samples at 16 kHz.
+
+    The same values the streaming detector computes from step `CLIP_FIRST_STEP` on
+    (see there). The mel model is run step by step, on the same 1760-sample pieces
+    as the streaming path, because its output depends on the loudest sound in its
+    input; the embeddings are computed in batches. Empty if the clip is shorter than
+    `CLIP_FIRST_STEP` steps.
+    """
+    import numpy as np
+
+    audio = np.concatenate([np.zeros(_MEL_CONTEXT, dtype=np.float32), samples])
+    steps = (len(audio) - _MEL_CONTEXT) // STEP_SAMPLES
+    pieces = [audio[k * STEP_SAMPLES : (k + 1) * STEP_SAMPLES + _MEL_CONTEXT] for k in range(steps)]
+    mels = np.concatenate([melspectrogram(mel, piece) for piece in pieces] or [np.zeros((0, 32))])
+    ends = range(8 * CLIP_FIRST_STEP, len(mels) + 1, 8)
+    windows = [mels[end - _EMBEDDING_WINDOW : end] for end in ends]
+    if not windows:
+        return np.zeros((0, _EMBEDDING_DIM), dtype=np.float32)
+    parts = [embeddings(embed, windows[i : i + batch]) for i in range(0, len(windows), batch)]
+    return np.concatenate(parts).astype(np.float32)
+
+
+@dataclass
+class NumpyHead:
+    """A trained phrase classifier in numpy: the last `features` embeddings, each
+    normalised with `mean`/`std` (96,), flattened, Dense(32, ReLU), Dense(1, sigmoid).
+
+    Saved as an `.npz` (no pickled objects). `get_inputs` and `run` mirror an
+    onnxruntime session, so the detector uses it in place of the ONNX classifier.
+    """
+
+    w1: Any
+    b1: Any
+    w2: Any
+    b2: Any
+    mean: Any
+    std: Any
+    phrase: str = ""
+    threshold: float = 0.5
+    features: int = 16
+
+    def scores(self, windows: Any) -> Any:
+        """Scores (n,) for feature windows (n, features, 96)."""
+        import numpy as np
+
+        x = ((np.asarray(windows, dtype=np.float32) - self.mean) / self.std).reshape(
+            len(windows), -1
+        )
+        hidden = np.maximum(x @ self.w1 + self.b1, 0.0)
+        logits = (hidden @ self.w2 + self.b2).reshape(-1)
+        return 1.0 / (1.0 + np.exp(-np.clip(logits, -50.0, 50.0)))
+
+    def get_inputs(self) -> list[Any]:
+        from types import SimpleNamespace
+
+        return [SimpleNamespace(name="features", shape=[1, self.features, _EMBEDDING_DIM])]
+
+    def run(self, outputs: Any, feeds: dict[str, Any]) -> list[Any]:
+        (windows,) = feeds.values()
+        return [self.scores(windows)[:, None]]
+
+    def save(self, path: str | Path) -> None:
+        import numpy as np
+
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("wb") as file:
+            np.savez(
+                file,
+                w1=self.w1, b1=self.b1, w2=self.w2, b2=self.b2, mean=self.mean, std=self.std,
+                phrase=np.array(self.phrase), threshold=np.array(self.threshold),
+                features=np.array(self.features), version=np.array(HEAD_FORMAT),
+            )  # fmt: skip
+
+    @classmethod
+    def load(cls, path: str | Path) -> NumpyHead:
+        import numpy as np
+
+        with np.load(path, allow_pickle=False) as data:
+            version = int(data["version"])
+            if version != HEAD_FORMAT:
+                raise ValueError(f"{path}: wake-word head format {version} is not supported")
+            names = ("w1", "b1", "w2", "b2", "mean", "std")
+            arrays = {name: data[name].astype(np.float32) for name in names}
+            return cls(
+                **arrays,
+                phrase=str(data["phrase"]),
+                threshold=float(data["threshold"]),
+                features=int(data["features"]),
+            )
 
 
 def _sha256(data: bytes) -> str:
@@ -149,7 +278,8 @@ class OpenWakeWordDetector:
     """openWakeWord's ONNX pipeline (see the module docstring), loaded on `load` or
     the first frame.
 
-    `model` is the phrase classifier; `melspectrogram.onnx` and
+    `model` is the phrase classifier (ONNX, or a `NumpyHead` if it ends in `.npz`);
+    `melspectrogram.onnx` and
     `embedding_model.onnx` are expected beside it. Frames of any length are
     accepted; a new score is computed for every 1280 samples, and between steps
     the last score is returned.
@@ -175,13 +305,7 @@ class OpenWakeWordDetector:
     def _session(self, path: Path) -> Any:
         if self._session_factory is not None:
             return self._session_factory(str(path))
-        import onnxruntime as ort
-
-        options = ort.SessionOptions()
-        options.intra_op_num_threads = 1
-        options.inter_op_num_threads = 1
-        options.log_severity_level = 3
-        return ort.InferenceSession(str(path), options, providers=["CPUExecutionProvider"])
+        return open_session(path)
 
     def load(self) -> None:
         """Load the three models now (raises `MissingModelsError` if a file is missing)."""
@@ -198,7 +322,10 @@ class OpenWakeWordDetector:
         directory = self._model.parent
         self._mel = self._session(directory / MEL_MODEL.name)
         self._embed = self._session(directory / EMBEDDING_MODEL.name)
-        self._classify = self._session(self._model)
+        if self._model.suffix == ".npz":
+            self._classify = NumpyHead.load(self._model)
+        else:
+            self._classify = self._session(self._model)
         first = self._classify.get_inputs()[0]
         self._classify_input = first.name
         if isinstance(first.shape[1], int):
@@ -215,17 +342,11 @@ class OpenWakeWordDetector:
 
     def _melspectrogram(self, samples: Any) -> Any:
         """Mel frames (n, 32) of int16-valued float32 `samples`, scaled as openWakeWord does."""
-        import numpy as np
-
-        output = self._mel.run(None, {"input": samples[None, :].astype(np.float32)})[0]
-        return np.squeeze(output).reshape(-1, _MEL_BINS) / 10.0 + 2.0
+        return melspectrogram(self._mel, samples)
 
     def _embedding(self, window: Any) -> Any:
         """The 96-dim embedding of 76 mel frames."""
-        import numpy as np
-
-        batch = window.astype(np.float32)[None, :, :, None]
-        return self._embed.run(None, {"input_1": batch})[0].reshape(_EMBEDDING_DIM)
+        return embeddings(self._embed, window[None, :, :]).reshape(_EMBEDDING_DIM)
 
     def reset(self) -> None:
         if self._classify is None:

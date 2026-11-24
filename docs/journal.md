@@ -2,6 +2,13 @@
 
 Dated notes on what was built, what failed and what changed. Newest first.
 
+## 2026-11-24: a personal wake phrase (ADR 0028)
+
+- `lucy wakeword record` (takes of "hey lucy", rejected when silent, clipped or cut off; `--negative` for everyday audio), `train` and `test`. The trained phrase model is a numpy head (`NumpyHead`, `.npz`) on openWakeWord's frozen embeddings; `OpenWakeWordDetector` loads it when `[wake] model` ends in `.npz`. No new dependency.
+- Batch features (`clip_embeddings`) give exactly the streaming detector's embeddings and scores (max difference 0.0 on a TTS clip with the hey jarvis model), once the mel model runs on the same 1760-sample pieces: over a whole clip its output differs, as it depends on the loudest sample in its input.
+- Smoke run on synthetic data only (macOS `say`, 14 voices): 40 takes and 4 minutes of negatives with near misses ("hey Lisa", "hey Lucas", "hey loosely", "Lucy", "hey Jarvis"). 32 takes and 3.1 min trained on, 8 takes and 1 min held out. Features 19 s, training 1 s (12 epochs), held-out evaluation 1 s, on this Mac. Held out: 8/8 takes detected at every threshold from 0.3 to 0.9; false wakes in the 1 minute: 3 up to 0.5, 1 from 0.55 (recommended 0.55). Scored separately in four voices, "hey lucy" gave 1.00 in all; "hey Lucas", "hey Lou", "hey loosely" and "hello Lucy" still reached 0.75 to 0.99 in some voices. Weighting negatives 10 times rather than 3, and using every negative window, cut the held-out false wakes from 5 to 3 at 0.5 and from 2 to 1 at 0.9.
+- Not measured: a real person's recordings through `record`, the microphone commands at all (`record`, `record --negative` and `test` ran only against a fake microphone in tests), and training time at the intended size (80 takes, 30 minutes of negatives); from the smoke run it should be about a minute of features.
+
 ## 2026-11-24: guests are restricted (ADR 0027, run B)
 
 - With `[people]` on, a guest's turn has no profile, instructions or retrieved memories (retrieval not called), only the current run of guest turns as history, a per-turn line saying who Lucy is with, and only `guest_tools` offered (`more_tools` limited to their groups); any other call, MCP and enrolment included, is refused where tools run. An owner's pending confirmation is ended (`not_owner`) by a guest's turn; guest turns are never extracted. Tests with fakes only; the live check was not run.

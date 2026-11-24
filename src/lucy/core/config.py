@@ -781,7 +781,8 @@ class WakeSettings(BaseModel):
     phrase: str = Field(default="hey jarvis", min_length=1)
     """The wake phrase as spoken; it is removed from the start of the transcript."""
     model: str = "data/models/wakeword/hey_jarvis_v0.1.onnx"
-    """The phrase model (ONNX); the mel and embedding models are expected beside it."""
+    """The phrase model (ONNX, or an `.npz` from `lucy wakeword train`); the mel and
+    embedding models are expected beside it."""
     threshold: float = Field(default=0.5, gt=0, lt=1)
     """Wake-word score from which the phrase counts as said."""
     followup_seconds: float = Field(default=8.0, ge=0, le=120)

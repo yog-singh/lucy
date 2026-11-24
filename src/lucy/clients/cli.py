@@ -27,7 +27,7 @@ from typing import Any, Final, TextIO
 from urllib.parse import urlsplit
 
 from lucy.app import JobBacklog, LucyApp
-from lucy.clients import mcp_cli, memory_cli, speakers_cli, vision_cli, voice_cli
+from lucy.clients import mcp_cli, memory_cli, speakers_cli, vision_cli, voice_cli, wakeword_cli
 from lucy.core.config import ConfigError, Settings, WakeSettings, load_settings
 from lucy.core.events import Interrupt, TextDelta, ToolStarted, TurnEnded, UserMessage
 from lucy.core.reminders import ReminderService
@@ -579,6 +579,7 @@ def _parser() -> argparse.ArgumentParser:
     voice_cli.add_parser(commands, common)
     voice_cli.add_listen_parser(commands, common)
     speakers_cli.add_parser(commands, common)
+    wakeword_cli.add_parser(commands, common)
     vision_cli.add_parser(commands, common)
     mcp_cli.add_parser(commands, common)
 
@@ -838,6 +839,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return asyncio.run(_memory(settings, args))
         if args.command == "speakers":
             return speakers_cli.run(settings, args, out=sys.stdout, err=sys.stderr)
+        if args.command == "wakeword":
+            return wakeword_cli.run(settings, args, out=sys.stdout, err=sys.stderr)
         if args.command == "vision":
             return vision_cli.run(settings, args, out=sys.stdout, err=sys.stderr)
         if args.command == "mcp":

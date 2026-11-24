@@ -123,6 +123,11 @@ model            = "data/models/wakeword/hey_jarvis_v0.1.onnx"
 # Score (0 to 1) from which the phrase counts as said. Higher: fewer false
 # wakes, more misses.
 threshold        = 0.5
+# A personal phrase trained on your own voice (`lucy wakeword record`, then
+# `lucy wakeword train`, which prints these lines with the threshold to use):
+# phrase    = "hey lucy"
+# model     = "data/models/wakeword/hey_lucy.npz"
+# threshold = 0.5
 # After a reply, how long you can speak again without the wake phrase.
 followup_seconds = 8
 # A short chime on waking, and a falling one on going back to waiting.
