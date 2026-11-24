@@ -27,6 +27,7 @@ discards those captured before it was ready to listen again.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import threading
 import time
@@ -491,12 +492,189 @@ def list_devices(sd: Any = None) -> str:
     return "\n".join(lines)
 
 
+# --- The system's default devices ---------------------------------------------------
+
+
+class DefaultDevices(Protocol):
+    """Where the system's current default devices are read from.
+
+    PortAudio reads the defaults once, when it starts, and sends no
+    notification when they change, so `SoundDeviceIO` polls this instead.
+    """
+
+    def current(self) -> tuple[int, int] | None:
+        """(default input id, default output id) as the system numbers them, or
+        None when they cannot be read (then the devices are not followed)."""
+        ...
+
+
+class CoreAudioDefaults:
+    """The macOS default input and output device ids, read from CoreAudio with ctypes.
+
+    The ids are CoreAudio's `AudioDeviceID`s (not PortAudio device numbers):
+    they only tell that the default changed. `name(id)` gives a device's name.
+    """
+
+    _SYSTEM_OBJECT: Final = 1  # kAudioObjectSystemObject
+    _DEFAULT_INPUT: Final = int.from_bytes(b"dIn ")  # kAudioHardwarePropertyDefaultInputDevice
+    _DEFAULT_OUTPUT: Final = int.from_bytes(b"dOut")  # ...DefaultOutputDevice
+    _RUN_LOOP: Final = int.from_bytes(b"rnlp")  # kAudioHardwarePropertyRunLoop
+    _NAME: Final = int.from_bytes(b"lnam")  # kAudioObjectPropertyName
+    _SCOPE_GLOBAL: Final = int.from_bytes(b"glob")
+    _ELEMENT_MAIN: Final = 0
+
+    def __init__(self) -> None:
+        import ctypes
+
+        class Address(ctypes.Structure):
+            _fields_ = [
+                ("selector", ctypes.c_uint32),
+                ("scope", ctypes.c_uint32),
+                ("element", ctypes.c_uint32),
+            ]
+
+        self._ctypes = ctypes
+        self._address = Address
+        audio = ctypes.CDLL("/System/Library/Frameworks/CoreAudio.framework/CoreAudio")
+        self._get = audio.AudioObjectGetPropertyData
+        self._get.restype = ctypes.c_int32
+        self._get.argtypes = [
+            ctypes.c_uint32,
+            ctypes.POINTER(Address),
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_uint32),
+            ctypes.c_void_p,
+        ]
+        cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+        self._cf_string = cf.CFStringGetCString
+        self._cf_string.restype = ctypes.c_bool
+        self._cf_string.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_char_p,
+            ctypes.c_long,
+            ctypes.c_uint32,
+        ]
+        self._cf_release = cf.CFRelease
+        self._cf_release.argtypes = [ctypes.c_void_p]
+        # Without a run loop of its own the HAL may not see device changes in a
+        # process that runs none (a terminal program): NULL makes it use its own thread.
+        set_data = audio.AudioObjectSetPropertyData
+        set_data.restype = ctypes.c_int32
+        set_data.argtypes = [
+            ctypes.c_uint32,
+            ctypes.POINTER(Address),
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        loop = ctypes.c_void_p(None)
+        address = Address(self._RUN_LOOP, self._SCOPE_GLOBAL, self._ELEMENT_MAIN)
+        set_data(
+            self._SYSTEM_OBJECT,
+            ctypes.byref(address),
+            0,
+            None,
+            ctypes.sizeof(loop),
+            ctypes.byref(loop),
+        )
+
+    def _device(self, selector: int) -> int | None:
+        ctypes = self._ctypes
+        address = self._address(selector, self._SCOPE_GLOBAL, self._ELEMENT_MAIN)
+        value = ctypes.c_uint32(0)
+        size = ctypes.c_uint32(ctypes.sizeof(value))
+        status = self._get(
+            self._SYSTEM_OBJECT, ctypes.byref(address), 0, None, ctypes.byref(size),
+            ctypes.byref(value),
+        )  # fmt: skip
+        return int(value.value) if status == 0 else None
+
+    def current(self) -> tuple[int, int] | None:
+        devices = self._device(self._DEFAULT_INPUT), self._device(self._DEFAULT_OUTPUT)
+        if devices[0] is None or devices[1] is None:
+            return None
+        return devices[0], devices[1]
+
+    def name(self, device: int) -> str | None:
+        """A device's name, or None if it cannot be read."""
+        ctypes = self._ctypes
+        address = self._address(self._NAME, self._SCOPE_GLOBAL, self._ELEMENT_MAIN)
+        ref = ctypes.c_void_p(None)
+        size = ctypes.c_uint32(ctypes.sizeof(ref))
+        status = self._get(device, ctypes.byref(address), 0, None, ctypes.byref(size),
+                           ctypes.byref(ref))  # fmt: skip
+        if status != 0 or not ref.value:
+            return None
+        try:
+            buffer = ctypes.create_string_buffer(512)
+            if not self._cf_string(ref, buffer, len(buffer), 0x08000100):  # UTF-8
+                return None
+            return buffer.value.decode("utf-8", "replace")
+        finally:
+            self._cf_release(ref)
+
+
+def system_default_devices() -> DefaultDevices | None:
+    """The default-device source for this platform: CoreAudio on macOS, else None."""
+    import sys
+
+    if sys.platform != "darwin":
+        return None
+    try:
+        source = CoreAudioDefaults()
+    except (OSError, AttributeError) as exc:
+        logger.info("cannot read the default sound devices from CoreAudio: %s", exc)
+        return None
+    return source if source.current() is not None else None
+
+
+@dataclass(frozen=True, slots=True)
+class _Remap:
+    """Output queue positions after a device switch: positions from `at` on were
+    re-resampled from `old_rate` to `new_rate`."""
+
+    at: int
+    old_rate: int
+    new_rate: int
+
+    def apply(self, mark: int) -> int:
+        if mark < self.at or self.old_rate == self.new_rate:
+            return mark
+        return self.at + int(round((mark - self.at) * self.new_rate / self.old_rate))
+
+
 class SoundDeviceIO:
     """The microphone and speaker through `sounddevice` (PortAudio).
 
     Both devices are opened at their native sample rate with callback streams
     when `start` is called, and stay open until `close` (output plays silence
     while idle, so playback starts without device start-up delay).
+
+    Following the system devices: a side whose device is not set (None) follows
+    the system default while running. `check_devices` (run every `poll_s`
+    seconds) reads the defaults from `default_devices`; once a change has held
+    for `settle_s` (Bluetooth headphones change output and input a moment
+    apart), both streams are closed, PortAudio is restarted so it sees the new
+    device list, and both are reopened at their native rates. The same reopen
+    runs when a stream fails on its own (stopped, or no callback for `stall_s`
+    seconds: a device unplugged before the poll noticed), retried with growing
+    pauses if no device can be opened. A side set explicitly keeps its device.
+
+    Audio queued but not yet played when the devices switch carries on on the
+    new speaker, re-resampled if its rate differs; the few milliseconds already
+    handed to the old device are lost. Waiting `play` calls and `frames()` carry
+    on across the switch, and `played_samples` stays in output-format samples
+    throughout. If no speaker can be opened, queued audio is dropped as if
+    stopped, so the turn ends instead of waiting. The switch runs on the event
+    loop, so it never interleaves with `play` or `_on_input`; it blocks the loop
+    for as long as opening the devices takes (usually well under a second).
+    `on_notice`, if set, gets one line per change ("sound: now using ...");
+    otherwise these lines are logged.
+
+    `default_devices` defaults to CoreAudio on macOS when `sd` is the real
+    module, and to nothing (no following) when a fake `sd` is passed.
 
     Threading: PortAudio calls the callbacks on its own threads. The input
     callback copies each block and hands it to the event loop with
@@ -521,7 +699,34 @@ class SoundDeviceIO:
         silent_input_warning_s: float = 3.0,
         clock: Callable[[], float] = time.monotonic,
         sd: Any = None,
+        default_devices: DefaultDevices | None | bool = True,
+        poll_s: float | None = 1.0,
+        settle_s: float = 1.0,
+        stall_s: float = 3.0,
+        on_notice: Callable[[str], None] | None = None,
     ) -> None:
+        if default_devices is True:
+            default_devices = system_default_devices() if sd is None else None
+        self._defaults: DefaultDevices | None = default_devices or None
+        self._poll_s = poll_s
+        self._settle_s = settle_s
+        self._stall_s = stall_s
+        self.on_notice = on_notice
+        self._seen: tuple[int, int] | None = None  # defaults the open streams were chosen by
+        self._candidate: tuple[int, int] | None = None
+        self._candidate_since = 0.0
+        self._stream_epoch = 0  # which pair of streams callbacks belong to
+        self._broken = False  # a stream stopped or failed on its own
+        self._last_in_callback = self._last_out_callback = 0.0
+        self._retry_at: float | None = None
+        self._retry_pause = 0.0
+        self._failing = False
+        self._watcher: asyncio.Task[None] | None = None
+        self._remaps: list[_Remap] = []
+        self._played_base = 0  # output-format samples played on earlier speakers
+        self._played_mark = 0  # `_played_frames` when the current speaker opened
+        self._opened_at = 0.0
+        self._announced = ("", "")  # (microphone, speaker) the user was last told of
         self._sd = sd
         self._want_input = input_device
         self._want_output = output_device
@@ -595,55 +800,154 @@ class SoundDeviceIO:
     async def start(self) -> None:
         """Open and start both devices. Raises `AudioDeviceError` with what to do."""
         import numpy as np
-        import soxr
 
         if self._sd is None:
             self._sd = _import_sounddevice()
         self._loop = asyncio.get_running_loop()
+        self._pending = np.zeros(0, dtype=np.float32)
+        self._seen = self._read_defaults()
+        try:
+            self._open_streams()
+        except AudioDeviceError:
+            await self.close()
+            raise
+        self._announced = (self._in_name, self._out_name)
+        if self._poll_s is not None:
+            self._watcher = asyncio.create_task(self._watch(), name="lucy-sound-devices")
+
+    def _open_streams(self) -> None:
+        """Open and start both streams on the wanted devices (the current defaults
+        for those not set). Raises `AudioDeviceError`; nothing is left open then."""
+        import soxr
+
+        sd = self._sd
         in_info = self._device(self._want_input, "input")
         out_info = self._device(self._want_output, "output")
-        self._in_name, self._out_name = str(in_info["name"]), str(out_info["name"])
-        self._in_rate = int(in_info["default_samplerate"])
-        self._out_rate = int(out_info["default_samplerate"])
-        self._out_channels = min(2, int(out_info["max_output_channels"]))
-        if self._in_rate != INPUT_SAMPLE_RATE:
-            self._in_resampler = soxr.ResampleStream(
-                self._in_rate, INPUT_SAMPLE_RATE, 1, dtype="float32"
-            )
-        if self._out_rate != OUTPUT_SAMPLE_RATE:
-            self._out_resampler = soxr.ResampleStream(
-                OUTPUT_SAMPLE_RATE, self._out_rate, 1, dtype="float32"
-            )
-        self._pending = np.zeros(0, dtype=np.float32)
-        sd = self._sd
+        in_name, out_name = str(in_info["name"]), str(out_info["name"])
+        in_rate = int(in_info["default_samplerate"])
+        out_rate = int(out_info["default_samplerate"])
+        out_channels = min(2, int(out_info["max_output_channels"]))
+        if self._out_rate and out_rate != self._out_rate:
+            self._retarget_output(out_rate)
+        self._out_rate = out_rate
+        self._out_resampler = (
+            soxr.ResampleStream(OUTPUT_SAMPLE_RATE, out_rate, 1, dtype="float32")
+            if out_rate != OUTPUT_SAMPLE_RATE
+            else None
+        )
+        self._in_rate = in_rate
+        self._in_resampler = (
+            soxr.ResampleStream(in_rate, INPUT_SAMPLE_RATE, 1, dtype="float32")
+            if in_rate != INPUT_SAMPLE_RATE
+            else None
+        )
+        self._in_name, self._out_name = in_name, out_name
+        self._out_channels = out_channels
+        self._stream_epoch += 1
+        epoch = self._stream_epoch
+        now = self._clock()
+        self._last_in_callback = self._last_out_callback = self._opened_at = now
+        self._broken = False
+
+        def on_input(indata: Any, frames: int, time_info: Any, status: Any) -> None:
+            self._input_callback(indata, frames, time_info, status, epoch=epoch)
+
+        def finished() -> None:
+            self._stream_finished(epoch)
+
         try:
             self._output_stream = sd.OutputStream(
                 device=out_info.get("index"),
-                samplerate=self._out_rate,
-                channels=self._out_channels,
+                samplerate=out_rate,
+                channels=out_channels,
                 dtype="float32",
                 latency="low",
                 callback=self._output_callback,
+                finished_callback=finished,
             )
             self._output_stream.start()
         except Exception as exc:
-            await self.close()
-            raise AudioDeviceError(f"cannot open the speaker {self._out_name!r}: {exc}") from exc
+            self._close_streams()
+            raise AudioDeviceError(f"cannot open the speaker {out_name!r}: {exc}") from exc
         try:
             self._input_stream = sd.InputStream(
                 device=in_info.get("index"),
-                samplerate=self._in_rate,
+                samplerate=in_rate,
                 channels=1,
                 dtype="float32",
-                callback=self._input_callback,
+                callback=on_input,
+                finished_callback=finished,
             )
             self._input_stream.start()
         except Exception as exc:
-            await self.close()
+            self._close_streams()
             raise AudioDeviceError(
-                f"cannot open the microphone {self._in_name!r}: {exc}. {MIC_PERMISSION_HINT}"
+                f"cannot open the microphone {in_name!r}: {exc}. {MIC_PERMISSION_HINT}"
             ) from exc
-        self._started_at = self._clock()
+        self._started_at = now
+        self._heard_signal = self._warned_silent = False
+
+    def _close_streams(self) -> None:
+        """Stop and close both streams; callbacks still in flight are ignored."""
+        streams = (self._input_stream, self._output_stream)
+        self._input_stream = self._output_stream = None
+        self._stream_epoch += 1
+        for stream in streams:
+            if stream is None:
+                continue
+            try:
+                getattr(stream, "abort", stream.stop)()
+            except Exception:
+                logger.debug("stopping a sound stream failed", exc_info=True)
+            try:
+                stream.close()
+            except Exception:
+                logger.debug("closing a sound stream failed", exc_info=True)
+
+    def _retarget_output(self, rate: int) -> None:
+        """Re-resample the audio not yet played to the new speaker's `rate`, keeping
+        `played_samples` and the queue positions waiting `play` calls hold right."""
+        import numpy as np
+
+        old = self._out_rate
+        tail = None
+        if self._out_resampler is not None:  # what the old resampler still holds
+            tail = self._out_resampler.resample_chunk(np.zeros(0, np.float32), last=True)
+        with self._lock:
+            rest = list(self._out_queue)
+            if rest:
+                rest[0] = rest[0][self._out_offset :]
+            if tail is not None and len(tail):
+                rest.append(tail)
+            pending = np.concatenate(rest) if rest else np.zeros(0, np.float32)
+            if len(pending):
+                pending = resample(pending, old, rate)
+            played = self._played_frames
+            self._played_base += int(round((played - self._played_mark) * OUTPUT_SAMPLE_RATE / old))
+            self._played_mark = played
+            self._remaps.append(_Remap(played, old, rate))
+            self._out_queue = deque([pending] if len(pending) else [])
+            self._out_offset = 0
+            self._queued_frames = played + len(pending)
+            self._out_rate = rate
+
+    def _restart_portaudio(self) -> None:
+        """Restart PortAudio so it reads the device list and the defaults again (it
+        reads them only when it starts). Every stream of the process must be closed:
+        `SoundDeviceIO` is the only user of `sounddevice` in Lucy."""
+        sd = self._sd
+        terminate = getattr(sd, "_terminate", None)
+        initialize = getattr(sd, "_initialize", None)
+        if terminate is None or initialize is None:
+            return
+        try:
+            terminate()
+        except Exception:
+            logger.debug("stopping PortAudio failed", exc_info=True)
+        try:
+            initialize()
+        except Exception as exc:
+            raise AudioDeviceError(f"cannot restart the PortAudio sound library: {exc}") from exc
 
     def describe(self) -> str:
         return (
@@ -654,27 +958,174 @@ class SoundDeviceIO:
     def now(self) -> float:
         return self._clock()
 
+    # --- Following the devices ------------------------------------------------------
+
+    def _tell(self, text: str) -> None:
+        if self.on_notice is not None:
+            try:
+                self.on_notice(text)
+                return
+            except Exception:
+                logger.debug("showing a sound notice failed", exc_info=True)
+        logger.warning("%s", text)
+
+    def _read_defaults(self) -> tuple[int, int] | None:
+        if self._defaults is None:
+            return None
+        try:
+            return self._defaults.current()
+        except Exception:
+            logger.debug("reading the default sound devices failed", exc_info=True)
+            return None
+
+    def _followed(self, defaults: tuple[int, int] | None) -> tuple[int | None, int | None]:
+        """The parts of `defaults` that matter: those of the sides not set explicitly."""
+        if defaults is None:
+            return None, None
+        return (
+            defaults[0] if self._want_input is None else None,
+            defaults[1] if self._want_output is None else None,
+        )
+
+    def _stream_finished(self, epoch: int) -> None:
+        """PortAudio thread: a stream stopped. Only matters if we did not stop it."""
+        loop = self._loop
+        if loop is None:
+            return
+        try:
+            loop.call_soon_threadsafe(self._mark_broken, epoch)
+        except RuntimeError:
+            pass
+
+    def _mark_broken(self, epoch: int) -> None:
+        if epoch == self._stream_epoch and not self._closed:
+            self._broken = True
+
+    def _failed(self, now: float) -> str | None:
+        """Why the open streams no longer work, or None."""
+        if self._output_stream is None or self._input_stream is None:
+            return "a sound device is not open"
+        if self._broken:
+            return "a sound stream stopped"
+        for stream in (self._output_stream, self._input_stream):
+            if not getattr(stream, "active", True):
+                return "a sound stream stopped"
+        if now - self._last_out_callback > self._stall_s:
+            return "the speaker stopped responding"
+        if now - self._last_in_callback > self._stall_s:
+            return "the microphone stopped responding"
+        return None
+
+    def check_devices(self) -> None:
+        """Reopen the devices if a followed default changed (and has settled) or a
+        stream failed. Runs every `poll_s` seconds; tests call it directly."""
+        if self._closed or self._loop is None:
+            return
+        now = self._clock()
+        if self._retry_at is not None:
+            if now >= self._retry_at:
+                self._switch("retry")
+            return
+        problem = self._failed(now)
+        if problem is not None:
+            if now - self._opened_at < 5 * self._stall_s and self._retry_pause:
+                self._schedule_retry(now)  # it failed again soon after reopening
+                return
+            logger.info("%s: reopening the sound devices", problem)
+            self._switch("failed")
+            return
+        if now - self._opened_at > 5 * self._stall_s:
+            self._retry_pause = 0.0  # healthy for a while
+        current = self._read_defaults()
+        if current is None or self._followed(current) == self._followed(self._seen):
+            self._candidate = None
+            return
+        if self._candidate != current:
+            self._candidate, self._candidate_since = current, now
+            return
+        if now - self._candidate_since >= self._settle_s:
+            self._switch("changed")
+
+    def _schedule_retry(self, now: float) -> None:
+        self._retry_pause = min(30.0, max(1.0, 2 * self._retry_pause))
+        self._retry_at = now + self._retry_pause
+
+    def _switch(self, reason: str) -> None:
+        """Close both streams, restart PortAudio and reopen on the current devices."""
+        before = self._announced
+        defaults = self._read_defaults()
+        self._candidate = None
+        self._close_streams()
+        try:
+            self._restart_portaudio()
+            self._open_streams()
+        except Exception as exc:
+            self._close_streams()
+            self._schedule_retry(self._clock())
+            if not self._failing:
+                self._failing = True
+                self.stop_playback()  # nothing can play it: let the turn end
+                self._tell(f"sound: cannot open the sound devices ({exc}); retrying")
+            else:
+                logger.debug("reopening the sound devices failed again: %s", exc)
+            return
+        self._seen = defaults
+        self._announced = (self._in_name, self._out_name)
+        self._retry_at = None
+        recovered, self._failing = self._failing, False
+        if reason == "changed":
+            self._retry_pause = 0.0
+        in_name, out_name = self._in_name, self._out_name
+        changed = [
+            (name, role)
+            for name, old, role in (
+                (out_name, before[1], "speaker"),
+                (in_name, before[0], "microphone"),
+            )
+            if name != old
+        ]
+        if len(changed) == 2 and in_name == out_name:
+            self._tell(f"sound: now using {out_name}")
+        elif changed:
+            self._tell("sound: now using " + ", ".join(f"{n} ({r})" for n, r in changed))
+        elif recovered or reason == "failed":
+            self._tell(f"sound: reopened {out_name} and {in_name}")
+        logger.info("sound devices: %s", self.describe())
+
+    async def _watch(self) -> None:
+        assert self._poll_s is not None
+        while not self._closed:
+            await asyncio.sleep(self._poll_s)
+            try:
+                self.check_devices()
+            except Exception:
+                logger.exception("checking the sound devices failed")
+
     # --- Capture ----------------------------------------------------------------
 
-    def _input_callback(self, indata: Any, frames: int, time_info: Any, status: Any) -> None:
+    def _input_callback(
+        self, indata: Any, frames: int, time_info: Any, status: Any, *, epoch: int | None = None
+    ) -> None:
         """PortAudio thread: hand a copy of the block to the event loop."""
         if status:
             self._status_errors += 1
+        captured_at = self._clock()
+        self._last_in_callback = captured_at
         block = indata[:, 0].copy()
         loop = self._loop
         if loop is None:
             return
         try:
-            loop.call_soon_threadsafe(self._on_input, block, self._clock())
+            loop.call_soon_threadsafe(self._on_input, block, captured_at, epoch)
         except RuntimeError:  # the loop has closed
             pass
 
-    def _on_input(self, block: Any, captured_at: float) -> None:
+    def _on_input(self, block: Any, captured_at: float, epoch: int | None = None) -> None:
         """Event loop: resample, cut into frames, queue them."""
         import numpy as np
 
-        if self._closed:
-            return
+        if self._closed or (epoch is not None and epoch != self._stream_epoch):
+            return  # from a stream closed since (its rate may differ)
         if not self._heard_signal and block.size and float(np.max(np.abs(block))) > 1e-4:
             self._heard_signal = True
         if (
@@ -718,6 +1169,7 @@ class SoundDeviceIO:
         """PortAudio thread: play queued audio, silence when there is none."""
         if status:
             self._status_errors += 1
+        self._last_out_callback = self._clock()
         filled = 0
         with self._lock:
             while filled < frames and self._out_queue:
@@ -751,11 +1203,15 @@ class SoundDeviceIO:
         self._waiters.append(waiter)
         await waiter
 
-    async def _played_past(self, mark: int, generation: int) -> bool:
-        """Wait until the device has played beyond frame `mark`; False if stopped first."""
+    async def _played_past(self, mark: int, generation: int, remaps: int) -> bool:
+        """Wait until the device has played beyond queue position `mark`, taken when
+        `remaps` device switches had happened; False if stopped first."""
         while generation == self._generation and not self._closed:
             with self._lock:
-                if self._played_frames > mark:
+                at = mark
+                for remap in self._remaps[remaps:]:  # the speaker changed since
+                    at = remap.apply(at)
+                if self._played_frames > min(at, self._queued_frames - 1):
                     return True
             await self._progress()
         return False
@@ -765,8 +1221,8 @@ class SoundDeviceIO:
         if not len(samples):
             return None
         with self._lock:
-            if generation != self._generation:
-                return None
+            if generation != self._generation or self._failing:
+                return None  # stopped, or no speaker to play it on
             start = self._queued_frames
             self._out_queue.append(samples)
             self._queued_frames += len(samples)
@@ -781,8 +1237,8 @@ class SoundDeviceIO:
         first: int | None = None
         watcher: asyncio.Task[None] | None = None
 
-        async def notify_start(mark: int) -> None:
-            if await self._played_past(mark, generation) and on_start is not None:
+        async def notify_start(mark: int, remaps: int) -> None:
+            if await self._played_past(mark, generation, remaps) and on_start is not None:
                 on_start()
 
         try:
@@ -796,7 +1252,7 @@ class SoundDeviceIO:
                 start = self._enqueue(samples, generation)
                 if first is None and start is not None:
                     first = start
-                    watcher = asyncio.create_task(notify_start(first))
+                    watcher = asyncio.create_task(notify_start(first, len(self._remaps)))
             if generation != self._generation:
                 return
             if self._out_resampler is not None:
@@ -804,12 +1260,12 @@ class SoundDeviceIO:
                 start = self._enqueue(tail, generation)
                 if first is None and start is not None:
                     first = start
-                    watcher = asyncio.create_task(notify_start(first))
+                    watcher = asyncio.create_task(notify_start(first, len(self._remaps)))
                 self._out_resampler.clear()
             with self._lock:
-                end = self._queued_frames
+                end, remaps = self._queued_frames, len(self._remaps)
             if first is not None:
-                await self._played_past(end - 1, generation)
+                await self._played_past(end - 1, generation, remaps)
             if watcher is not None:
                 await watcher
         finally:
@@ -830,31 +1286,25 @@ class SoundDeviceIO:
 
     @property
     def played_samples(self) -> int:
-        if not self._out_rate:
-            return 0
         with self._lock:
-            played = self._played_frames
-        return int(round(played * OUTPUT_SAMPLE_RATE / self._out_rate))
+            if not self._out_rate:
+                return self._played_base
+            played = self._played_frames - self._played_mark  # on the current speaker
+            return self._played_base + int(round(played * OUTPUT_SAMPLE_RATE / self._out_rate))
 
     async def close(self) -> None:
         if self._closed:
             return
         self._closed = True
+        if self._watcher is not None:
+            self._watcher.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._watcher
+            self._watcher = None
         with self._lock:
             self._out_queue.clear()
             self._generation += 1
-        for stream in (self._input_stream, self._output_stream):
-            if stream is None:
-                continue
-            try:
-                stream.stop()
-            except Exception:
-                logger.debug("stopping a sound stream failed", exc_info=True)
-            try:
-                stream.close()
-            except Exception:
-                logger.debug("closing a sound stream failed", exc_info=True)
-        self._input_stream = self._output_stream = None
+        self._close_streams()
         self._notify()
         self._frame_ready.set()
         if self._status_errors:

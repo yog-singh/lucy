@@ -369,9 +369,12 @@ async def _converse(
     from lucy.clients.cli import memory_banner
     from lucy.clients.speakers_cli import build_enroller, build_tagger
     from lucy.vision.glance import build_glancer
+    from lucy.voice.audio import SoundDeviceIO
     from lucy.voice.session import VoiceConfig, VoiceSession, deliver_reminders
 
     ui = TerminalUI(out, err, show_state=interactive, latin=app.settings.display.latin)
+    if isinstance(io, SoundDeviceIO):
+        io.on_notice = ui.notice  # "sound: now using ..." when the devices change
     tagger = build_tagger(app.settings, lambda m: print(f"lucy voice: {m}", file=err))
     session = VoiceSession(
         bus=app.bus,
@@ -559,6 +562,8 @@ async def run_listen(
         print(f"lucy listen: {exc}", file=err)
         return 2
     ui = TerminalUI(out, err, show_state=interactive, latin=settings.display.latin)
+    if isinstance(io, SoundDeviceIO):
+        io.on_notice = ui.notice  # "sound: now using ..." when the devices change
     app: LucyApp | None = None
     reminders: asyncio.Task[None] | None = None
     early = _early_reminders(settings)  # before the first wake: the store alone

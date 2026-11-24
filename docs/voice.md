@@ -234,6 +234,12 @@ endpoint_silence_ms = 600
 # input_device / output_device default to the system devices
 ```
 
+### Sound devices
+
+`input_device` and `output_device` take a device number or part of a name from `lucy voice --list-devices`; left unset, that side follows the system's default device while Lucy runs. PortAudio reads the defaults only when it starts and sends no notice when they change, so `SoundDeviceIO` reads them from CoreAudio (ctypes) about once a second. When a followed default has changed and held for a second (Bluetooth headphones switch output and input a moment apart), both streams are closed, PortAudio is restarted, and both reopen at the new devices' native rates; the terminal shows one line such as "sound: now using AirPods Pro". A side set explicitly keeps its device (a number can point elsewhere after devices come and go; a name is safer). A stream that stops on its own, or delivers no callback for 3 s (a device unplugged before the poll noticed: the `PaMacCore (AUHAL) err='-50'` case), takes the same reopen path, retried with growing pauses (1 s up to 30 s) and one "sound: cannot open the sound devices ...; retrying" line if nothing can be opened. Speech queued but not yet played when the speaker changes continues on the new one, re-resampled if its rate differs (the few milliseconds already handed to the old device are lost); the played-samples count used to record what was spoken stays in output samples across the switch. If no speaker can be opened, queued speech is dropped as if stopped, so the turn ends rather than waits. Following needs macOS; elsewhere only the recovery from failed streams applies. Tested against a fake device layer and a forced reopen on real devices; a real headphone switch has not been tested yet.
+
+With Bluetooth headphones macOS makes the headset's microphone the default input too, in its low-quality call mode (a low sample rate such as 16 or 24 kHz, and lower playback quality while the microphone is in use): speech recognition and the sound of Lucy's voice may suffer. To keep the Mac's microphone while the sound follows the headphones, set the input in `[voice]`, for example `input_device = "MacBook Pro Microphone"`. Lucy does not change this by default.
+
 ## Later options
 
 - **Wyoming adapters.** Wyoming is the Home Assistant ecosystem's protocol for voice services. STT, TTS and wake-word adapters that speak it would let Lucy use existing Wyoming services and receive audio from room satellites.
