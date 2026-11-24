@@ -210,6 +210,11 @@ class FakeStream:
         self.options = options
         self.callback = options["callback"]
         self.started = self.stopped = self.closed = False
+        self.dead = False  # the device went away under it
+
+    @property
+    def active(self) -> bool:
+        return self.started and not self.stopped and not self.dead
 
     def start(self) -> None:
         if self.kind in self.sd.fail_start:
@@ -249,6 +254,14 @@ class FakeSD:
         self.fail_start = set(fail_start)
         self.no_input = no_input
         self.streams: dict[str, FakeStream] = {}
+        self.restarts = 0  # PortAudio terminated and initialised again
+        self.opened = 0
+
+    def _terminate(self) -> None:
+        self.restarts += 1
+
+    def _initialize(self) -> None:
+        pass
 
     def query_devices(self, device: Any = None, kind: str | None = None) -> Any:
         if kind is not None:
@@ -264,10 +277,12 @@ class FakeSD:
 
     def InputStream(self, **options: Any) -> FakeStream:  # noqa: N802
         stream = self.streams["input"] = FakeStream(self, "input", **options)
+        self.opened += 1
         return stream
 
     def OutputStream(self, **options: Any) -> FakeStream:  # noqa: N802
         stream = self.streams["output"] = FakeStream(self, "output", **options)
+        self.opened += 1
         return stream
 
 
@@ -291,6 +306,7 @@ async def render(stream: FakeStream, frames: int) -> np.ndarray:
 
 async def started_io(**options: Any) -> tuple[SoundDeviceIO, FakeSD]:
     sd = options.pop("sd", None) or FakeSD()
+    options.setdefault("poll_s", None)  # tests call `check_devices` themselves
     io = SoundDeviceIO(sd=sd, **options)
     await io.start()
     return io, sd
@@ -481,3 +497,285 @@ def test_sound_device_wav_helpers_reject_float_wav(tmp_path) -> None:
 
 def test_concat_helper() -> None:
     assert concat(silence(0.1), tone(0.1)).duration == pytest.approx(0.2)
+
+
+# --- Following the system's default devices ------------------------------------------
+
+
+class FakeDefaults:
+    """The system's default devices; here the ids are the fake PortAudio numbers."""
+
+    def __init__(self, sd: FakeSD) -> None:
+        self.sd = sd
+        self.supported = True
+
+    def current(self) -> tuple[int, int] | None:
+        return tuple(self.sd.default.device) if self.supported else None  # type: ignore[return-value]
+
+    def set(self, inp: int, out: int) -> None:
+        self.sd.default.device = [inp, out]
+
+
+class Clock:
+    def __init__(self) -> None:
+        self.t = 100.0
+
+    def __call__(self) -> float:
+        return self.t
+
+
+async def following_io(**options: Any) -> tuple[SoundDeviceIO, FakeSD, FakeDefaults, Clock, list]:
+    sd = FakeSD()
+    defaults = FakeDefaults(sd)
+    clock = Clock()
+    notices: list[str] = []
+    io, _ = await started_io(
+        sd=sd, default_devices=defaults, clock=clock, on_notice=notices.append, **options
+    )
+    return io, sd, defaults, clock, notices
+
+
+def settle(io: SoundDeviceIO, clock: Clock) -> None:
+    """Two polls a second apart: the change is seen, then acted on."""
+    io.check_devices()
+    clock.t += 1.0
+    io.check_devices()
+
+
+async def test_an_output_change_reopens_on_the_new_speaker() -> None:
+    io, sd, defaults, clock, notices = await following_io()
+    old_out, old_in = sd.streams["output"], sd.streams["input"]
+    defaults.set(1, 3)  # headphones: USB Headset at 16 kHz
+    settle(io, clock)
+    assert sd.restarts == 1
+    assert old_out.closed and old_in.closed
+    out = sd.streams["output"]
+    assert out is not old_out and out.started
+    assert out.options["samplerate"] == 16000 and out.options["channels"] == 1
+    assert sd.streams["input"].options["device"] == 1  # the microphone is unchanged
+    assert notices == ["sound: now using USB Headset (speaker)"]
+    assert "speaker: USB Headset (16000 Hz)" in io.describe()
+    await io.close()
+
+
+async def test_an_input_change_reopens_and_frames_carry_on() -> None:
+    io, sd, defaults, clock, notices = await following_io()
+    old_in = sd.streams["input"]
+    frames = io.frames()
+    capture_block(old_in, np.full(48000 // 10, 0.1, np.float32))
+    defaults.set(3, 2)
+    settle(io, clock)
+    assert notices == ["sound: now using USB Headset (microphone)"]
+    new_in = sd.streams["input"]
+    assert new_in.options["samplerate"] == 16000
+    capture_block(old_in, np.full(4800, 0.9, np.float32))  # late block of the old stream
+    capture_block(new_in, np.full(16000 // 10, 0.5, np.float32))
+    await asyncio.sleep(0.05)
+    got = await collect(frames, 3)
+    levels = [float(np.max(np.abs(pcm_to_float(f.audio.data)))) for f in got]
+    assert all(level < 0.6 for level in levels)  # the old stream's late block was ignored
+    assert levels[-1] == pytest.approx(0.5, abs=0.01)
+    await io.close()
+
+
+async def test_both_changing_together_gives_one_switch_and_one_line() -> None:
+    io, sd, defaults, clock, notices = await following_io()
+    defaults.set(3, 3)
+    settle(io, clock)
+    assert sd.restarts == 1
+    assert notices == ["sound: now using USB Headset"]
+    await io.close()
+
+
+async def test_changes_settle_before_switching() -> None:
+    io, sd, defaults, clock, _ = await following_io()
+    defaults.set(1, 3)  # output first ...
+    io.check_devices()
+    clock.t += 0.5
+    defaults.set(3, 3)  # ... the microphone a moment later
+    io.check_devices()
+    clock.t += 0.5
+    io.check_devices()
+    assert sd.restarts == 0
+    clock.t += 0.6
+    io.check_devices()
+    assert sd.restarts == 1
+    io.check_devices()
+    assert sd.restarts == 1
+    await io.close()
+
+
+async def test_an_explicit_device_stays_fixed() -> None:
+    io, sd, defaults, clock, notices = await following_io(output_device="Built-in Speakers")
+    defaults.set(1, 3)  # only the (explicit) output default changes: nothing to do
+    settle(io, clock)
+    assert sd.restarts == 0
+    defaults.set(3, 3)  # the followed microphone changes
+    settle(io, clock)
+    assert sd.restarts == 1
+    assert sd.streams["output"].options["device"] == 2
+    assert sd.streams["input"].options["device"] == 3
+    assert notices == ["sound: now using USB Headset (microphone)"]
+    await io.close()
+
+
+async def test_no_following_when_the_defaults_cannot_be_read() -> None:
+    io, sd, defaults, clock, _ = await following_io()
+    defaults.supported = False
+    defaults.set(3, 3)
+    settle(io, clock)
+    assert sd.restarts == 0
+    await io.close()
+    io2, sd2 = await started_io(default_devices=None)
+    sd2.default.device = [3, 3]
+    io2.check_devices()
+    assert sd2.restarts == 0
+    await io2.close()
+
+
+async def test_a_switch_while_idle_keeps_the_count_and_silence() -> None:
+    io, sd, defaults, clock, _ = await following_io()
+    task = asyncio.create_task(io.play(chunks_of(tone(0.2, rate=OUTPUT_SAMPLE_RATE))))
+    async with asyncio.timeout(TIMEOUT):
+        while not task.done():
+            await render(sd.streams["output"], 480)
+            await asyncio.sleep(0)
+    heard = io.played_samples
+    assert heard == pytest.approx(0.2 * OUTPUT_SAMPLE_RATE, rel=0.03)
+    defaults.set(1, 3)
+    settle(io, clock)
+    assert io.played_samples == heard
+    assert not (await render(sd.streams["output"], 256)).any()
+    assert io.played_samples == heard
+    await io.close()
+
+
+async def test_a_switch_during_playback_continues_on_the_new_speaker() -> None:
+    io, sd, defaults, clock, notices = await following_io()
+    started: list[bool] = []
+    whole = tone(1.0, rate=OUTPUT_SAMPLE_RATE).data
+    reply = [
+        AudioChunk(data=whole[i : i + 4800], sample_rate=OUTPUT_SAMPLE_RATE)
+        for i in range(0, len(whole), 4800)
+    ]
+    task = asyncio.create_task(io.play(chunks_of(*reply), on_start=lambda: started.append(True)))
+    before = []
+    async with asyncio.timeout(TIMEOUT):
+        while io.played_samples < 0.3 * OUTPUT_SAMPLE_RATE:
+            before.append(await render(sd.streams["output"], 480))
+            await asyncio.sleep(0)
+    defaults.set(1, 3)  # 48 kHz stereo -> 16 kHz mono
+    settle(io, clock)
+    out = sd.streams["output"]
+    after = []
+    async with asyncio.timeout(TIMEOUT):
+        while not task.done():
+            after.append(await render(out, 160))
+            await asyncio.sleep(0)
+    await task
+    assert started == [True]
+    loud_before = int((np.abs(np.concatenate(before)[:, 0]) > 0.01).sum())
+    loud_after = int((np.abs(np.concatenate(after)[:, 0]) > 0.01).sum())
+    heard = loud_before / 48000 + loud_after / 16000
+    assert heard == pytest.approx(1.0, abs=0.02)  # nothing lost or repeated beyond a few ms
+    assert dominant_frequency(np.concatenate(after)[:4000, 0], 16000) == pytest.approx(440, abs=5)
+    assert io.played_samples == pytest.approx(1.0 * OUTPUT_SAMPLE_RATE, rel=0.02)
+    # Later playback is counted at the new rate.
+    mark = io.played_samples
+    task = asyncio.create_task(io.play(chunks_of(tone(0.25, rate=OUTPUT_SAMPLE_RATE))))
+    async with asyncio.timeout(TIMEOUT):
+        while not task.done():
+            await render(out, 160)
+            await asyncio.sleep(0)
+    assert io.played_samples - mark == pytest.approx(0.25 * OUTPUT_SAMPLE_RATE, rel=0.03)
+    await io.close()
+
+
+async def test_a_failed_stream_is_reopened() -> None:
+    io, sd, _, clock, notices = await following_io()
+    sd.streams["output"].dead = True  # e.g. the AUHAL -50 error after unplugging
+    io.check_devices()
+    assert sd.restarts == 1 and sd.streams["output"].active
+    assert notices == ["sound: reopened Built-in Speakers and Built-in Microphone"]
+    # A stream that reports it finished (PortAudio's finished callback, on its thread).
+    clock.t += 100
+    io.check_devices()  # healthy: callbacks are not checked by the fake clock ... until now
+    await asyncio.to_thread(sd.streams["input"].options["finished_callback"])
+    await asyncio.sleep(0.01)
+    io.check_devices()
+    assert sd.restarts >= 2
+    await io.close()
+
+
+async def test_a_stalled_stream_is_reopened_and_our_own_stops_are_not_failures() -> None:
+    io, sd, _, clock, _ = await following_io()
+    old = sd.streams["output"]
+    clock.t += 2.0
+    await render(old, 64)
+    capture_block(sd.streams["input"], np.zeros(480, np.float32))
+    io.check_devices()
+    assert sd.restarts == 0  # callbacks still come
+    clock.t += 3.5  # and now they stopped
+    io.check_devices()
+    assert sd.restarts == 1
+    # Our own stop of the old stream reports finished: ignored.
+    await asyncio.to_thread(old.options["finished_callback"])
+    await asyncio.sleep(0.01)
+    assert not io._broken
+    await io.close()
+
+
+async def test_reopening_retries_with_pauses_and_ends_waiting_playback() -> None:
+    io, sd, defaults, clock, notices = await following_io()
+    task = asyncio.create_task(io.play(chunks_of(tone(2.0, rate=OUTPUT_SAMPLE_RATE))))
+    await asyncio.sleep(0.01)
+    sd.fail_start = {"output"}
+    defaults.set(1, 3)
+    settle(io, clock)
+    await asyncio.wait_for(task, TIMEOUT)  # the turn ends instead of hanging
+    assert len(notices) == 1 and notices[0].startswith("sound: cannot open the sound devices")
+    opened = sd.opened
+    for _ in range(5):  # within the pause nothing is tried: no spinning
+        io.check_devices()
+    assert sd.opened == opened
+    clock.t += 1.0
+    io.check_devices()  # retry 1 fails, quietly
+    assert sd.opened == opened + 1 and len(notices) == 1
+    played = io.played_samples
+    await io.play(chunks_of(tone(0.1, rate=OUTPUT_SAMPLE_RATE)))  # no speaker: returns at once
+    assert io.played_samples == played
+    sd.fail_start = set()
+    clock.t += 2.0
+    io.check_devices()
+    assert sd.streams["output"].active and sd.streams["input"].active
+    assert notices[-1] == "sound: now using USB Headset (speaker)"
+    task = asyncio.create_task(io.play(chunks_of(tone(0.1, rate=OUTPUT_SAMPLE_RATE))))
+    async with asyncio.timeout(TIMEOUT):
+        while not task.done():
+            await render(sd.streams["output"], 160)
+            await asyncio.sleep(0)
+    assert io.played_samples - played == pytest.approx(0.1 * OUTPUT_SAMPLE_RATE, rel=0.05)
+    await io.close()
+
+
+async def test_the_watcher_polls_while_running_and_stops_on_close() -> None:
+    sd = FakeSD()
+    defaults = FakeDefaults(sd)
+    io = SoundDeviceIO(sd=sd, default_devices=defaults, poll_s=0.01, settle_s=0.0, stall_s=60)
+    await io.start()
+    defaults.set(1, 3)
+    async with asyncio.timeout(TIMEOUT):
+        while sd.restarts == 0:
+            await asyncio.sleep(0.01)
+    await io.close()
+    assert io._watcher is None
+
+
+def test_defaults_are_not_followed_off_macos(monkeypatch) -> None:
+    import sys
+
+    from lucy.voice.audio import system_default_devices
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert system_default_devices() is None
+    assert SoundDeviceIO(sd=FakeSD())._defaults is None  # a fake `sd`: nothing to follow
