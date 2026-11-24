@@ -214,8 +214,10 @@ class ConfirmationRequested(Event):
 
 
 ConfirmationOutcome = Literal[
-    "confirmed", "declined", "superseded", "expired", "unheard", "changed"
+    "confirmed", "declined", "superseded", "expired", "unheard", "changed", "not_owner"
 ]
+"""`not_owner` (ADR 0027): a guest's turn came next, and a guest cannot answer a question
+asked in the owner's turn; the request is cancelled and nothing runs."""
 
 
 class ConfirmationResolved(Event):
@@ -256,6 +258,36 @@ class ToolsConfigured(Event):
     names: tuple[str, ...]
 
 
+PresenceRole = Literal["owner", "guest"]
+"""Who a turn is with (ADR 0027): the owner named in `[people] owner`, or anyone else."""
+
+PresenceBasis = Literal["typed", "voice", "face", "carried", "none"]
+"""Which rule decided a turn's `PresenceRole` (ADR 0027, `lucy.core.presence`):
+typed in `lucy chat`; the voice tag; the glance; carried over from a recent decision;
+or nothing to go on (a guest)."""
+
+
+class TurnWith(Event):
+    """Who the turn whose `UserMessage` follows is with (ADR 0027, `lucy.core.presence`).
+
+    Written by the orchestrator at the start of every user turn while `[people]` is
+    enabled, before the turn's `UserMessage` (after any `ToolsConfigured`), with the
+    same `turn_id`; `message_id` is that message's id. A record like `ToolsConfigured`:
+    persisted, never published on the bus, never a message, ignored by history,
+    memory extraction and clients. What acts on who is present (guest restrictions,
+    what is learned) reads this record rather than deciding again. Not an
+    authentication: a recording or a photo of the owner passes (ADR 0027, Security).
+    """
+
+    type: Literal["turn_with"] = "turn_with"
+    role: PresenceRole
+    name: str | None = None
+    """The recognised person's name; the owner's configured name for the owner; None
+    for a guest nobody recognised."""
+    basis: PresenceBasis
+    message_id: str
+
+
 # --- Transient ----------------------------------------------------------------
 
 
@@ -292,7 +324,7 @@ OUTBOUND_EVENTS: tuple[type[Event], ...] = (
     ConfirmationResolved,
     TurnEnded,
 )
-RECORD_EVENTS: tuple[type[Event], ...] = (ToolsConfigured,)
+RECORD_EVENTS: tuple[type[Event], ...] = (ToolsConfigured, TurnWith)
 """Persisted bookkeeping: never published, never part of the conversation."""
 
 AnyEvent = Annotated[
@@ -309,7 +341,8 @@ AnyEvent = Annotated[
     | ConfirmationRequested
     | ConfirmationResolved
     | TurnEnded
-    | ToolsConfigured,
+    | ToolsConfigured
+    | TurnWith,
     Field(discriminator="type"),
 ]
 """Any concrete event, discriminated by its `type` field."""

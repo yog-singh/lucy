@@ -42,6 +42,14 @@ from lucy.core.events import (
 from lucy.core.gateway import LLMGateway, Priority, SilentStreamError
 from lucy.core.history import events_to_messages, tool_message
 from lucy.core.ports import ConfirmableTool, MemoryStore, Tool, TraceSink, tool_spec
+from lucy.core.presence import (
+    Presence,
+    PresencePolicy,
+    guest_line,
+    guest_run,
+    latest_turn_with,
+    turn_with,
+)
 from lucy.core.privacy import guard_question, guarded, needs_guard, visible_private_sources
 from lucy.core.reminders import TimerHandler
 from lucy.core.sentences import SentenceSplitter
@@ -50,6 +58,7 @@ from lucy.core.toolsets import ToolGroup, ToolSelector
 from lucy.core.trace import StepTrace, TurnTrace
 from lucy.core.types import (
     FinishReason,
+    MemoryContext,
     Message,
     PromptPrefix,
     Risk,
@@ -73,6 +82,7 @@ NOT_RUN: dict[ConfirmationOutcome, str] = {
     "expired": "Not run: the confirmation expired.",
     "unheard": "Not run: the question was cut off before the user heard it.",
     "changed": "Not run: it changed since the user was asked.",
+    "not_owner": "Not run: someone else spoke next, and only the owner can answer.",
 }
 """The tool result given to the model when a confirmation ends without a run."""
 
@@ -125,6 +135,17 @@ class _Step:
         )
 
 
+@dataclass(frozen=True)
+class _Toolbox:
+    """The tools one kind of turn may use (ADR 0027): everything for the owner (and
+    with `[people]` off), only `guest_tools` for a guest. `tools` are callable by name
+    (with the selector's `more_tools`); `specs` are offered when there is no selector."""
+
+    tools: Mapping[str, Tool]
+    specs: list[ToolSpec]
+    selector: ToolSelector | None
+
+
 @dataclass
 class _Turn:
     session_id: str
@@ -133,6 +154,11 @@ class _Turn:
     steps: list[StepTrace] = field(default_factory=list)
     context: list[SectionReport] = field(default_factory=list)
     step: _Step | None = None  # the step currently streaming, if any
+    presence: Presence | None = None  # who the turn is with, with `[people]` (ADR 0027)
+
+    @property
+    def guest(self) -> bool:
+        return self.presence is not None and self.presence.guest
 
 
 class Orchestrator:
@@ -184,6 +210,18 @@ class Orchestrator:
     that a newly configured tool in one of `tool_groups` made stale are left out of
     the prompt history (`lucy.core.toolchanges`), here and in `next_turn_prefix`;
     the trace's context report counts them as `stale_exchanges`.
+
+    Who is present (ADR 0027): with `people`, each user turn is decided to be with
+    the owner or a guest (`lucy.core.presence`) and a `TurnWith` record is logged
+    (not published) before its user message, and put in the trace; `turn_with` gives
+    a client the same decision before it publishes. A guest's turn (run B) is limited
+    in code: no profile, standing instructions or retrieved memories; only the current
+    run of guest turns' exchanges as history (`presence.guest_run`); a per-turn line
+    saying who Lucy is with (`presence.guest_line`); only `guest_tools` offered, with
+    `more_tools` limited to their groups, and any other call refused where tools run,
+    never executed. A confirmation asked in an owner's turn cannot be answered by a
+    guest's: it is ended (`not_owner`), and a yes or no gets a code-said reply.
+    `next_turn_prefix` assumes the next turn is with whoever the latest one was.
     """
 
     def __init__(
@@ -202,6 +240,8 @@ class Orchestrator:
         timer_handlers: Mapping[str, TimerHandler] | None = None,
         selector: ToolSelector | None = None,
         tool_groups: Sequence[ToolGroup] = (),
+        people: PresencePolicy | None = None,
+        guest_tools: Sequence[str] = (),
     ) -> None:
         if max_steps < 1:
             raise ValueError("max_steps must be at least 1")
@@ -228,6 +268,22 @@ class Orchestrator:
             if meta.name in self._tools:
                 raise ValueError(f"duplicate tool name {meta.name!r}")
             self._tools[meta.name] = meta
+        self._people = people  # None: `[people]` off, nothing decided or recorded
+        self._owner_box = _Toolbox(self._tools, self._tool_specs, self._selector)
+        # A guest's tools (ADR 0027, run B): `guest_tools` that are configured, in order.
+        allowed = set(guest_tools) & {tool.name for tool in tools}
+        self._guest_tools = [tool.name for tool in tools if tool.name in allowed]
+        guest_selector = None
+        if self._selector is not None:
+            guest_selector = self._selector.limited_to(self._guest_tools)
+            if not guest_selector.active:
+                guest_selector = None
+        guest_callable: dict[str, Tool] = {n: self._tools[n] for n in self._guest_tools}
+        if guest_selector is not None:
+            guest_callable[guest_selector.meta.name] = guest_selector.meta
+        self._guest_box = _Toolbox(
+            guest_callable, [tool_spec(self._tools[n]) for n in self._guest_tools], guest_selector
+        )
         self._trace = trace
         self._chat_role = chat_role
         self._max_steps = max_steps
@@ -276,24 +332,63 @@ class Orchestrator:
         placeholder = UserMessage(session_id=session_id, text="")
         coming = [*episodes, *([record] if record else []), placeholder][-self._history_limit :]
         kept, _ = self._tool_changes.leave_out_stale(coming)
-        history = events_to_messages(kept)
+        # Who the next turn is with is not known yet: assume whoever the latest was
+        # (ADR 0027). A guest's prefix is shaped as a guest's turn shapes its prompt.
+        latest = latest_turn_with(episodes) if self._people is not None else None
+        if latest is not None and latest.guest:
+            run = guest_run(coming, latest.name) | {placeholder.id}
+            scope = _of_turns(coming, run)
+            history = events_to_messages(_of_turns(kept, run))
+            memory = MemoryContext()
+            box = self._guest_box
+        else:
+            scope = coming
+            history = events_to_messages(kept)
+            window = self._gateway.for_role(self._chat_role).capabilities.context_window
+            budget = self._context.token_budgets(window)["memories"]
+            query = next((e.text for e in reversed(episodes) if isinstance(e, UserMessage)), "")
+            memory = await self._memory.retrieve(query=query, budget=budget)
+            box = self._owner_box
         window = self._gateway.for_role(self._chat_role).capabilities.context_window
-        budget = self._context.token_budgets(window)["memories"]
-        query = next((e.text for e in reversed(episodes) if isinstance(e, UserMessage)), "")
-        memory = await self._memory.retrieve(query=query, budget=budget)
         built = self._context.build(memory=memory, history=history, context_window=window)
         return PromptPrefix(
             role=self._chat_role,
             messages=self._context.prefix_messages(built),
-            tools=self._offered(coming),
+            tools=self._offered(scope, box=box),
         )
 
-    def _offered(self, episodes: Sequence[AnyEvent], extra: Sequence[str] = ()) -> list[ToolSpec]:
+    async def turn_with(self, message: UserMessage) -> Presence | None:
+        """Who the turn of `message` (not yet published) will be with, decided as the
+        turn will decide it, from the same log; None with `[people]` off. Nothing is
+        stored. Lets a voice client mark a guest's turn as it shows the words."""
+        if self._people is None:
+            return None
+        episodes = await self._memory.recent_episodes(message.session_id, self._history_limit)
+        return self._people.decide(episodes, message)
+
+    def _offered(
+        self,
+        episodes: Sequence[AnyEvent],
+        extra: Sequence[str] = (),
+        *,
+        box: _Toolbox | None = None,
+    ) -> list[ToolSpec]:
         """The specifications offered for a turn whose events are `episodes` (the
-        user message last), plus groups `extra` switched on during the turn."""
-        if self._selector is None:
-            return list(self._tool_specs)
-        return self._selector.specs(self._selector.groups_on(episodes) | set(extra))
+        user message last), plus groups `extra` switched on during the turn, from
+        `box` (default: the owner's, everything)."""
+        box = box or self._owner_box
+        if box.selector is None:
+            return list(box.specs)
+        return box.selector.specs(box.selector.groups_on(episodes) | set(extra))
+
+    def _box(self, turn: _Turn) -> _Toolbox:
+        return self._guest_box if turn.guest else self._owner_box
+
+    def _owner_only(self, call: ToolCall) -> ToolResult:
+        """The result of a call a guest may not make (ADR 0027): never run."""
+        owner = self._people.owner if self._people is not None else "the owner"
+        content = f"Not run: that is only available to {owner}."
+        return ToolResult(call_id=call.id, content=content, is_error=True)
 
     # --- Scheduling -----------------------------------------------------------
 
@@ -370,24 +465,53 @@ class Orchestrator:
         record = self._tool_changes.record(earlier, turn.session_id, turn.turn_id)
         if record is not None:
             await self._memory.append_episode(record)  # never published (ADR 0025)
+        if self._people is not None:
+            # Who the turn is with (ADR 0027), from the log and the message alone; logged
+            # for what acts on it, never published. Not authentication.
+            turn.presence = self._people.decide(earlier, message)
+            await self._memory.append_episode(
+                turn.presence.record(turn.session_id, turn.turn_id, message.id)
+            )
         await self._memory.append_episode(message.model_copy(update={"turn_id": turn.turn_id}))
 
         episodes = await self._memory.recent_episodes(turn.session_id, self._history_limit)
+        box = self._box(turn)
         # Decided before any LLM call, from the log alone (ADR 0006).
         request = pending_confirmation(episodes, message)
-        answered = await self._resolve(turn, request, episodes, message) if request else []
+        answered: list[Message] = []
+        if request is not None and turn.guest and not _asked_a_guest(request, episodes):
+            # A guest cannot answer the owner's question (ADR 0027): it is ended, and
+            # nothing of the owner's call reaches the guest's prompt or turn.
+            if await self._end_for_guest(turn, request, episodes, message):
+                await self._emit(TurnEnded(**self._ids(turn), reason="completed"))
+                return "completed", None
+        elif request is not None:
+            answered = await self._resolve(turn, request, episodes, message, box)
         kept, stale = self._tool_changes.leave_out_stale(episodes)
-        history = events_to_messages(kept)
         window = self._gateway.for_role(self._chat_role).capabilities.context_window
-        budget = self._context.token_budgets(window)["memories"]
-        memory = await self._memory.retrieve(query=message.text, budget=budget)
         # The glance's names (ADR 0026, stage 3) are words for this turn's prompt only:
         # a tag, never an authorisation. Retrieval, confirmations and tools ignore them.
+        note = seen_line(message.seen)
+        scope: Sequence[AnyEvent] = episodes
+        if turn.guest and turn.presence is not None and self._people is not None:
+            # A guest's turn (ADR 0027, run B): only the current guest run's exchanges,
+            # no profile, instructions or memories (retrieval is not even asked), and
+            # a line saying who Lucy is with and what is the owner's alone.
+            run = guest_run(episodes, turn.presence.name)
+            scope = _of_turns(episodes, run)
+            kept = _of_turns(kept, run)
+            memory = MemoryContext()
+            line = guest_line(self._people.owner, turn.presence.name, self._guest_tools)
+            note = "\n".join(p for p in (line, note) if p)
+        else:
+            budget = self._context.token_budgets(window)["memories"]
+            memory = await self._memory.retrieve(query=message.text, budget=budget)
+        history = events_to_messages(kept)
         built = self._context.build(
             memory=memory,
             history=history,
             context_window=window,
-            turn_note=seen_line(message.seen),
+            turn_note=note,
         )
         turn.context = built.report
         if stale:
@@ -397,10 +521,10 @@ class Orchestrator:
             ]
         messages = [*built.messages, *answered]
         switched_on: set[str] = set()
-        if self._selector is not None and answered:
+        if box.selector is not None and answered:
             # A confirmed call's group is offered, as it would be had it been logged earlier.
-            switched_on = self._selector.from_calls(answered[0].tool_calls)
-        specs = self._offered(episodes, sorted(switched_on))
+            switched_on = box.selector.from_calls(answered[0].tool_calls)
+        specs = self._offered(scope, sorted(switched_on), box=box)
 
         for step_number in range(1, self._max_steps + 1):
             text, calls = await self._run_step(turn, messages, specs)
@@ -412,16 +536,17 @@ class Orchestrator:
                 # rebuilding history drops them as unanswered.
                 break
             messages.append(Message(role=Role.ASSISTANT, content=text, tool_calls=calls))
-            if self._selector is not None:
-                # A group asked for, or used, is offered from the next step on.
-                new = self._selector.from_calls(calls) - switched_on
+            if box.selector is not None:
+                # A group asked for, or used, is offered from the next step on (for a
+                # guest, only the guest's groups exist).
+                new = box.selector.from_calls(calls) - switched_on
                 if new:
                     switched_on |= new
-                    specs = self._offered(episodes, sorted(switched_on))
+                    specs = self._offered(scope, sorted(switched_on), box=box)
             question: str | None = None
             waiting_for = ""
             for call in calls:
-                tool = self._tools.get(call.name)
+                tool = box.tools.get(call.name)
                 # The private-data guard (ADR 0022) reads what the model sees now.
                 sources = visible_private_sources(messages, self._tools)
                 if tool is None or not needs_guard(tool, sources):
@@ -429,12 +554,14 @@ class Orchestrator:
                 if question is not None:
                     content = f"Not run: waiting for the user's confirmation of {waiting_for}."
                     result = ToolResult(call_id=call.id, content=content, is_error=True)
+                elif tool is None and call.name in self._tools:
+                    result = self._owner_only(call)  # a guest's turn (ADR 0027): never run
                 elif tool is not None and (tool.risk == Risk.DANGEROUS or sources):
                     result, question = await self._request_confirmation(turn, call, tool, sources)
                     waiting_for = call.name
                 else:
                     await self._emit(ToolStarted(**self._ids(turn), call=call))
-                    result = await self._run_tool(call)
+                    result = await self._run_tool(call, box)
                 await self._emit(ToolFinished(**self._ids(turn), result=result))
                 messages.append(tool_message(result))
             if question is not None:
@@ -509,13 +636,17 @@ class Orchestrator:
         await self._emit(AssistantMessage(**self._ids(turn), text=step.text, tool_calls=calls))
         return step.text, calls
 
-    async def _run_tool(self, call: ToolCall) -> ToolResult:
-        """Run one tool call; failures become error results.
+    async def _run_tool(self, call: ToolCall, box: _Toolbox | None = None) -> ToolResult:
+        """Run one tool call from `box` (default: the owner's); failures become error
+        results, and a configured tool outside `box` is refused, never run.
 
         The caller enforces the risk tier: a dangerous call reaches this only
         once the user has confirmed it (`_resolve`).
         """
-        tool = self._tools.get(call.name)
+        box = box or self._owner_box
+        tool = box.tools.get(call.name)
+        if tool is None and call.name in self._tools:
+            return self._owner_only(call)
         if tool is None:
             return ToolResult(
                 call_id=call.id, content=f"Unknown tool {call.name!r}.", is_error=True
@@ -580,20 +711,44 @@ class Orchestrator:
             await self._publish(SentenceReady(**self._ids(turn), text=sentence))
         await self._emit(AssistantMessage(**self._ids(turn), text=text))
 
+    async def _end_for_guest(
+        self,
+        turn: _Turn,
+        request: ConfirmationRequested,
+        episodes: Sequence[AnyEvent],
+        message: UserMessage,
+    ) -> bool:
+        """End the owner's pending `request`, which a guest's turn cannot answer
+        (ADR 0027): logged as `not_owner`, nothing runs, and the call is not put in
+        this turn. When the guest's words were a yes or a no, code says why and
+        True is returned (the turn ends there); otherwise the turn goes on."""
+        await self._emit(
+            ConfirmationResolved(**self._ids(turn), request_id=request.id, outcome="not_owner")
+        )
+        if outcome_for(request, episodes, message) not in ("confirmed", "declined"):
+            return False
+        owner = self._people.owner if self._people is not None else "the owner"
+        await self._say(turn, f"Only {owner} can answer that, so nothing was changed.")
+        return True
+
     async def _resolve(
         self,
         turn: _Turn,
         request: ConfirmationRequested,
         episodes: Sequence[AnyEvent],
         message: UserMessage,
+        box: _Toolbox | None = None,
     ) -> list[Message]:
-        """Answer the pending `request` with `message`; on a yes, run the logged call.
+        """Answer the pending `request` with `message`; on a yes, run the logged call
+        (only if it is in `box`, default the owner's: a guest's turn answers only
+        questions asked in a guest's turn, whose calls are the guest's).
 
         Returns the messages to add after the user's message: a code-authored
         assistant tool call (the logged call under a fresh id) and its result.
         """
+        box = box or self._owner_box
         outcome = outcome_for(request, episodes, message)
-        tool = self._tools.get(request.call.name)
+        tool = box.tools.get(request.call.name)
         if outcome == "confirmed":
             # The target must still be the one the user was asked about.
             if tool is None:
@@ -610,7 +765,7 @@ class Orchestrator:
         await self._emit(AssistantMessage(**self._ids(turn), tool_calls=[call]))
         if outcome == "confirmed":
             await self._emit(ToolStarted(**self._ids(turn), call=call))
-            result = await self._run_tool(call)
+            result = await self._run_tool(call, box)
         else:
             result = ToolResult(call_id=call.id, content=NOT_RUN[outcome], is_error=True)
         await self._emit(ToolFinished(**self._ids(turn), result=result))
@@ -658,6 +813,7 @@ class Orchestrator:
             ended_at=_now(),
             steps=turn.steps,
             context=turn.context,
+            presence=turn.presence,
             outcome=outcome,
             error=error,
         )
@@ -681,3 +837,15 @@ class Orchestrator:
         """Publish to live clients; skipped once the bus is closed (during shutdown)."""
         if not self._bus.closed:
             await self._bus.publish(event)
+
+
+def _of_turns(events: Sequence[AnyEvent], turn_ids: set[str]) -> list[AnyEvent]:
+    """The events of the turns `turn_ids` (or with one of those ids): a guest's scope."""
+    return [e for e in events if e.turn_id in turn_ids or e.id in turn_ids]
+
+
+def _asked_a_guest(request: ConfirmationRequested, episodes: Sequence[AnyEvent]) -> bool:
+    """Whether `request` was asked in a guest's turn (by its `TurnWith`); a question
+    asked in the owner's turn, or in one with no record, is the owner's to answer."""
+    asked = turn_with(episodes, request.turn_id) if request.turn_id else None
+    return asked is not None and asked.guest

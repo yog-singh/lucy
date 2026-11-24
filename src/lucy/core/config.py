@@ -27,6 +27,7 @@ from pydantic import (
 )
 
 from lucy.core.context import ContextLayout
+from lucy.core.names import clean_name
 from lucy.core.types import Risk
 
 
@@ -932,6 +933,86 @@ class VisionSettings(BaseModel):
     capture uses the camera's own `warmup_frames`): fewer is faster but darker."""
 
 
+DEFAULT_GUEST_TOOLS: Final = (
+    "wikipedia",
+    "web_search",
+    "fetch_page",
+    "time",
+    "weather",
+    "set_timer",
+    "look",
+)
+"""The tools a guest may use (ADR 0027): lookups, time, weather, a timer and `look`."""
+
+OWNER_ONLY_TOOLS: Final = frozenset(
+    {"enroll_voice", "replace_voice", "enroll_face", "replace_face"}
+)
+"""Tools `[people] guest_tools` may never list (ADR 0027): enrolling decides who the owner is."""
+
+
+class PeopleSettings(BaseModel):
+    """Acting on who is present (ADR 0027): each user turn is with the owner or a guest.
+
+    Off by default; off, nothing is decided or recorded and Lucy behaves as before.
+    On, each turn's decision is recorded (`TurnWith`) and shown. A voice or face match
+    is not authentication (a recording or a photo of the owner passes): this is a
+    privacy default for a shared home, not a security boundary.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    enabled: bool = False
+    owner: str | None = None
+    """The one person who gets everything: their enrolled voice and face name. Required
+    when enabled. Anyone else, enrolled family included, is a guest."""
+    carry_minutes: float = Field(default=5.0, ge=0, le=120)
+    """When a turn cannot tell who is speaking, the last positive decision of the
+    session is kept if it is at most this many minutes old; otherwise a guest. A guess,
+    not measured."""
+    guest_tools: list[str] = Field(default_factory=lambda: list(DEFAULT_GUEST_TOOLS))
+    """The tools a guest may use (ADR 0027): only these are offered on a guest's turn,
+    and any other call is refused in code. Built-in tool names; never the enrolment
+    tools (a guest could enrol a voice or face under the owner's name)."""
+
+    @field_validator("owner")
+    @classmethod
+    def _owner_name(cls, owner: str | None) -> str | None:
+        if owner is None:
+            return None
+        try:
+            return clean_name(owner)  # the rules that name voices and faces
+        except ValueError:
+            raise ValueError(
+                f"[people] owner {owner!r} is not a usable name: give the plain name the "
+                "owner's voice or face is enrolled under, such as 'Asha'"
+            ) from None
+
+    @model_validator(mode="after")
+    def _check(self) -> Self:
+        if self.enabled and self.owner is None:
+            raise ValueError(
+                '[people] is enabled but has no owner; set owner = "NAME", the name '
+                "the owner's voice or face is enrolled under"
+            )
+        known = ToolsSettings.known_tools()
+        unknown = [name for name in self.guest_tools if name not in known]
+        if unknown:
+            raise ValueError(
+                f"[people] guest_tools lists unknown tool(s) {', '.join(map(repr, unknown))}; "
+                f"known tools: {', '.join(known)}"
+            )
+        owners = [name for name in self.guest_tools if name in OWNER_ONLY_TOOLS]
+        if owners:
+            raise ValueError(
+                f"[people] guest_tools lists {', '.join(map(repr, owners))}, which only the "
+                "owner may use: a guest could enrol a voice or face under the owner's name"
+            )
+        twice = sorted({n for n in self.guest_tools if self.guest_tools.count(n) > 1})
+        if twice:
+            raise ValueError(f"[people] guest_tools lists {', '.join(map(repr, twice))} twice")
+        return self
+
+
 DEFAULT_MEMORY: Final = AdapterConfig(adapter="sqlite", options={"path": "data/lucy.db"})
 """The memory store used when the settings have no `[memory]` section."""
 
@@ -958,6 +1039,7 @@ class Settings(BaseModel):
     workspace: WorkspaceSettings = Field(default_factory=WorkspaceSettings)
     speakers: SpeakersSettings = Field(default_factory=SpeakersSettings)
     vision: VisionSettings = Field(default_factory=VisionSettings)
+    people: PeopleSettings = Field(default_factory=PeopleSettings)
 
     @model_validator(mode="after")
     def _check_vision(self) -> Self:

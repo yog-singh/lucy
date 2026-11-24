@@ -323,6 +323,14 @@ class _ObservingUI:
     def user(self, text: str) -> None:
         self._ui.user(text)
 
+    def user_guest(self, text: str, speaker: str | None, label: str) -> None:
+        # A guest's turn ([people], ADR 0027), marked when the wrapped UI can.
+        marked = getattr(self._ui, "user_guest", None)
+        if marked is not None:
+            marked(text, speaker, label)
+        else:
+            self._ui.user(text)
+
     def reply_delta(self, text: str) -> None:
         self._ui.reply_delta(text)
 

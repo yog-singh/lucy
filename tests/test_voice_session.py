@@ -82,6 +82,8 @@ class Harness:
         orchestrate: bool = True,
         speakers: Any = None,
         glancer: Any = None,
+        people: Any = None,
+        ui: Any = None,
     ) -> None:
         self.bus = EventBus()
         self.llm = FakeLLM(scripts)
@@ -93,6 +95,7 @@ class Harness:
                 memory=self.memory,
                 context=ContextBuilder("You are Lucy."),
                 tools=tools,
+                people=people,
             )
             if orchestrate
             else None
@@ -101,7 +104,7 @@ class Harness:
         self.vad = ScriptedVAD(level=0.1)
         self.stt = FakeSTT(transcripts)
         self.tts = tts or FakeTTS()
-        self.ui = RecordingUI()
+        self.ui = ui if ui is not None else RecordingUI()
         self.session = VoiceSession(
             bus=self.bus,
             session_id="cli",
@@ -114,6 +117,11 @@ class Harness:
             timings_path=timings_path,
             speakers=speakers,
             glancer=glancer,
+            presence=(
+                self.orchestrator.turn_with
+                if people is not None and self.orchestrator is not None
+                else None
+            ),
         )
         self._orchestrator_task: asyncio.Task[None] | None = None
         self.run_task: asyncio.Task[None] | None = None

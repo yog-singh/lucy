@@ -362,6 +362,24 @@ permission_timeout = 60
 # threshold = 0.40         # cosine similarity for a match; uncalibrated
 # options   = { provider = "coreml" }  # or "cpu"
 
+# [people]
+# Optional, off by default (ADR 0027). Lucy decides for every turn whether she is
+# talking with the owner or with a guest: typed in `lucy chat` is the owner; else
+# the voice tag ([speakers]) decides; else the glance ([vision] glance); else the
+# last such decision of the conversation is kept for `carry_minutes`, and after
+# that it is a guest. An enrolled family member who is not the owner is a guest.
+# A guest gets only `guest_tools` (others are refused in code, MCP included), no
+# profile, memories or earlier owner exchanges, and nothing they say is learned;
+# the enrolment tools are never allowed. "(guest)" is shown next to what was
+# said. Enrol the owner from `lucy chat` first ("remember my face"), since spoken
+# turns of an unenrolled owner are a guest's. A voice or face match is not
+# authentication (a recording or a photo of the owner passes): a privacy default
+# for a shared home, not a security boundary.
+# enabled       = true
+# owner         = "Asha"   # the name the owner's voice or face is enrolled under
+# carry_minutes = 5
+# guest_tools   = ["wikipedia", "web_search", "fetch_page", "time", "weather", "set_timer", "look"]
+
 # [mcp]
 # Optional. MCP servers whose tools Lucy may use (docs/adr/0022-mcp-client.md).
 # Nothing is enabled by default (the example below is commented out). After

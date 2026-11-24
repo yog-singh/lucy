@@ -60,18 +60,38 @@ class VoiceFingerprintIdentifier:
         self._recognizer = recognizer
         return recognizer
 
+    def _embed(self, recognizer: Any, path: Path) -> Any:
+        """The library's levelling and VAD, then speech tiled to fill the encoder's window.
+
+        Left to itself the library zero-pads speech shorter than its window (3 s), and
+        the padded frames dominate the filterbank's mean normalisation, so a short clip
+        of an enrolled voice scores near 0 (checks/speaker_short, ADR 0021).
+        """
+        speech = recognizer.preprocess(str(path))
+        encoder = recognizer.encoder
+        window = encoder.chunk_config.window_samples(encoder.sample_rate)
+        return encoder.embed_utterance(tile_to(speech, window))
+
     def identify(self, path: Path) -> list[SpeakerMatch]:
         with self._lock:
             recognizer = self._load()
             if len(recognizer.book) == 0:
                 return []
-            matches = recognizer.identify(str(path), top_k=len(recognizer.book))
-        return [SpeakerMatch(m.name, float(m.score), bool(m.accepted)) for m in matches]
+            embedding = self._embed(recognizer, path)
+            names, centroids = recognizer.book.centroids()
+            scores = [float(recognizer.score_embeddings(c, embedding)) for c in centroids]
+        ranked = sorted(zip(names, scores, strict=True), key=lambda m: -m[1])
+        return [SpeakerMatch(n, s, s >= self._threshold) for n, s in ranked]
 
     def enroll(self, name: str, paths: Sequence[Path]) -> None:
+        import numpy as np
+
+        if not paths:
+            raise ValueError(f"no audio supplied for {name!r}")
         with self._lock:
             recognizer = self._load()
-            recognizer.enroll(name, [str(p) for p in paths])
+            embeddings = np.stack([self._embed(recognizer, p) for p in paths])
+            recognizer.book.add(name, embeddings)
             recognizer.save(self._book_path)
 
     def speakers(self) -> dict[str, int]:
@@ -84,6 +104,16 @@ class VoiceFingerprintIdentifier:
             recognizer = self._load()
             recognizer.book.remove(name)
             recognizer.save(self._book_path)
+
+
+def tile_to(wav: Any, length: int) -> Any:
+    """Repeat `wav` end to end until it is `length` samples; longer or empty input is unchanged."""
+    import numpy as np
+
+    n = len(wav)
+    if n == 0 or n >= length:
+        return wav
+    return np.tile(wav, -(-length // n))[:length]
 
 
 def download_weights(directory: Path) -> Path:

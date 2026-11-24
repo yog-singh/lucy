@@ -130,6 +130,8 @@ class ToolSelector:
             )
         self._tools = {t.name: t for t in tools}
         self._order = names
+        self._all_groups = tuple(groups)
+        self._core_names = frozenset(core_set)
         grouped: dict[str, list[str]] = {}
         self._group_of: dict[str, str] = {}
         declared: dict[str, ToolGroup] = {}
@@ -151,6 +153,22 @@ class ToolSelector:
         self._use_keywords = keywords
         self._patterns = {g.name: keyword_pattern(g.keywords) for g in declared.values()}
         self.meta = MoreTools(self._groups)
+
+    def limited_to(self, names: Iterable[str]) -> ToolSelector:
+        """A selector over only the tools named in `names` (a guest's, ADR 0027): the
+        same groups, core, keywords and guidance, with every other tool left out, so its
+        `more_tools` lists and switches on only groups that have one of those tools.
+        Check `active` on the result: with no group left, every one of them is core."""
+        allowed = set(names)
+        tools = [self._tools[n] for n in self._order if n in allowed]
+        return ToolSelector(
+            tools,
+            self._all_groups,
+            core=self._core_names & {t.name for t in tools},
+            keep_turns=self._keep_turns,
+            guidance=self._guidance,
+            keywords=self._use_keywords,
+        )
 
     # --- What is configured -----------------------------------------------------
 

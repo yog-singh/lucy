@@ -208,6 +208,17 @@ class TerminalUI:
         self._write(f"you> {text}\n")
         self._draw()
 
+    def user_guest(self, text: str, speaker: str | None, label: str) -> None:
+        """A turn treated as a guest's ([people], ADR 0027): a dim "(guest)" or
+        "(guest: Asha)" after the words, so a misjudgement is easy to spot."""
+        self._clear()
+        who = f"you ({speaker})" if speaker else "you"
+        mark = f"({label})"
+        if getattr(self._out, "isatty", lambda: False)():
+            mark = f"\x1b[2m{mark}\x1b[0m"
+        self._write(f"{who}> {text}  {mark}\n")
+        self._draw()
+
     def reply_delta(self, text: str) -> None:
         if self._latin:
             if self._translit is None:
@@ -391,6 +402,7 @@ async def _converse(
         glancer=build_glancer(
             app.settings, app.vision, lambda m: print(f"lucy voice: {m}", file=err)
         ),
+        presence=app.turn_with if app.settings.people.enabled else None,
     )
     earlier = len(await app.memory.recent_episodes(args.session, 1_000_000))
     print(f"Session {args.session!r} ({earlier} earlier events).", file=err)
@@ -594,6 +606,7 @@ async def run_listen(
             speakers=tagger,
             enroller=build_enroller(settings, tagger),
             glancer=build_glancer(settings, app.vision, ui.notice),
+            presence=app.turn_with if settings.people.enabled else None,
         )
         if app.reminders is not None:
             reminders = asyncio.create_task(
