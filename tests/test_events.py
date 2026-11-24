@@ -22,6 +22,7 @@ from lucy.core.events import (
     ToolsConfigured,
     ToolStarted,
     TurnEnded,
+    TurnWith,
     UserMessage,
     event_from_json,
     event_to_json,
@@ -59,6 +60,7 @@ SAMPLES: list[Event] = [
     ConfirmationResolved(session_id="s", turn_id="t2", request_id="r1", outcome="declined"),
     TurnEnded(session_id="s", turn_id="t1", reason="error", error="boom"),
     ToolsConfigured(session_id="s", turn_id="t3", names=("time", "look")),
+    TurnWith(session_id="s", turn_id="t3", role="guest", name="Asha", basis="face", message_id="m"),
 ]
 
 

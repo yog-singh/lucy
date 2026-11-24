@@ -22,6 +22,13 @@ the turns whose episodes are not yet extracted, oldest turn first, and for each:
    user" (`rewrite_user_texts`);
 9. marks every content episode of the turn extracted, last.
 
+A guest's turn (ADR 0027: its `TurnWith` record says "guest") is never extracted:
+it is marked extracted at once, without a model call, so it is not retried, and
+its episodes are left out of the earlier conversation shown for other turns.
+Nothing a guest said, and nothing Lucy answered them, becomes a statement; the
+entity summaries, reflection and the profile read only statements, so nothing of
+a guest's turn reaches them either.
+
 Statements come only from what the user said: the source episodes of every
 statement are the turn's user-message episodes. Lucy's replies and tool
 results are shown for understanding only.
@@ -73,14 +80,14 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time
 from typing import Any, Final, Literal
 
 from pydantic import BaseModel
 
-from lucy.core.events import AssistantMessage, ToolFinished, TurnEnded, UserMessage
+from lucy.core.events import AssistantMessage, ToolFinished, TurnEnded, TurnWith, UserMessage
 from lucy.core.gateway import GatewayError, LLMGateway, Preempted, Priority
 from lucy.core.jobs import Handler, Job, JobStore, utc_now
 from lucy.core.types import Message, Role
@@ -479,6 +486,8 @@ class Extractor:
             for entity in known:
                 also = f"; also called {', '.join(entity.aliases)}" if entity.aliases else ""
                 lines.append(f"- {entity.name} ({entity.type}{also})")
+        guests = await self.guest_turns(r.event.turn_id for r in before)
+        before = [r for r in before if r.event.turn_id not in guests]
         rendered_before = [line for r in before if (line := render_episode(r))]
         if rendered_before:
             lines += ["", "Earlier conversation (context only):", *rendered_before]
@@ -495,6 +504,11 @@ class Extractor:
         ids = [r.id for r in episodes]
         sources = [r.id for r in episodes if isinstance(r.event, UserMessage)]
         report = TurnReport(key=turn_key(episodes), episode_ids=ids, source_ids=sources)
+        if await self.guest_turns(r.event.turn_id for r in episodes):
+            # Nothing is learned from a guest's turn (ADR 0027); marked so it is done.
+            report.skipped = "a guest's turn"
+            await self._graph.mark_extracted(ids)
+            return report
         if not sources:
             report.skipped = "no user message"
             await self._graph.mark_extracted(ids)
@@ -555,6 +569,15 @@ class Extractor:
             report.rewritten = await self.rewrite_user_texts(user_name)
         await self._graph.mark_extracted(ids)
         return report
+
+    async def guest_turns(self, turn_ids: Iterable[str | None]) -> set[str]:
+        """Which of `turn_ids` were a guest's turns, by their `TurnWith` records."""
+        guests: set[str] = set()
+        for turn_id in {t for t in turn_ids if t is not None}:
+            records = await self._graph.turn_episodes(turn_id, types=("turn_with",))
+            if any(isinstance(r.event, TurnWith) and r.event.role == "guest" for r in records):
+                guests.add(turn_id)
+        return guests
 
     async def skip_turn(self, episodes: Sequence[EpisodeRecord], reason: str) -> TurnReport:
         """Mark a turn extracted without extracting it (a poison turn)."""

@@ -11,6 +11,7 @@ from typing import Literal
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 from lucy.core.context import SectionReport
+from lucy.core.presence import Presence
 from lucy.core.types import FinishReason, Message
 
 
@@ -63,6 +64,7 @@ class TurnTrace(BaseModel):
 
     `context` is the `ContextBuilder` report (empty if the turn failed before
     the context was built). `error` is set when `outcome` is "error".
+    `presence` is who the turn was with, with `[people]` enabled (ADR 0027).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -73,5 +75,6 @@ class TurnTrace(BaseModel):
     ended_at: AwareDatetime
     steps: list[StepTrace] = Field(default_factory=list)
     context: list[SectionReport] = Field(default_factory=list)
+    presence: Presence | None = None
     outcome: Literal["completed", "interrupted", "error"]
     error: str | None = None

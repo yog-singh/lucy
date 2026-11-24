@@ -66,6 +66,7 @@ import re
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from pathlib import Path
 from types import MappingProxyType, TracebackType
 from typing import Any, Final, Self
 
@@ -75,7 +76,7 @@ from lucy.core import registry as _registry
 from lucy.core.bus import EventBus, Subscription
 from lucy.core.config import DEFAULT_MEMORY, McpServerSettings, Settings
 from lucy.core.context import ContextBuilder, estimate_tokens
-from lucy.core.events import TurnEnded
+from lucy.core.events import TurnEnded, UserMessage
 from lucy.core.gateway import LLMGateway, Preempted, add_fallbacks
 from lucy.core.jobs import Handler, Job, JobRunner, JobStatus, utc_now
 from lucy.core.orchestrator import Orchestrator
@@ -91,13 +92,14 @@ from lucy.core.ports import (
     TraceSink,
     tool_spec,
 )
+from lucy.core.presence import Presence, PresencePolicy
 from lucy.core.registry import Registry, RegistryError
 from lucy.core.reminders import REMINDER_TIMER, ReminderService, TimerHandler
 from lucy.core.residency import Residency
 from lucy.core.toolsets import META_TOOL, ToolGroup, ToolSelector, keyword_words
 from lucy.core.trace import TurnTrace
 from lucy.core.types import MemoryContext, Risk, ToolSpec, TTSCaps
-from lucy.core.workspace import Workspace
+from lucy.core.workspace import SPEAKERS, Workspace
 from lucy.memory.decay import DecayPolicy
 from lucy.memory.extraction import (
     DEFAULT_TRANSIENT_ERRORS,
@@ -133,7 +135,8 @@ from lucy.tools import DEFAULT_CORE, GROUPS, build_tools
 from lucy.tools.face_enrolment import VISION_TOOLS
 from lucy.tools.reminders import REMINDER_TOOLS, build_store, local_announcement
 from lucy.tools.voice_enrolment import ENROL_TOOLS, ENROLMENT_TIMER, handle_enrolment
-from lucy.vision.faces import FaceBook
+from lucy.vision.faces import BOOK_NAME as FACE_BOOK
+from lucy.vision.faces import FACES, FaceBook
 from lucy.vision.service import FaceRules, VisionService
 
 logger = logging.getLogger(__name__)
@@ -517,6 +520,13 @@ class LucyApp:
             raise RuntimeError("LucyApp is not running; call start() first")
         return self._bus
 
+    async def turn_with(self, message: UserMessage) -> Presence | None:
+        """Who the turn of `message` will be with (ADR 0027), before it is published;
+        None with `[people]` off or before `start`."""
+        if self._orchestrator is None:
+            return None
+        return await self._orchestrator.turn_with(message)
+
     @property
     def memory(self) -> MemoryStore:
         """The memory store. Available after `start`."""
@@ -759,6 +769,8 @@ class LucyApp:
                 selector=selector,
                 # Built whether or not tools are dynamic: they judge stale exchanges.
                 tool_groups=tool_groups(self.settings, self._tools),
+                people=people_policy(self.settings),
+                guest_tools=self.settings.people.guest_tools,
             )
             self._run_task = asyncio.create_task(self._orchestrator.run(), name="lucy-orchestrator")
             self._start_residency(self._orchestrator)
@@ -1146,3 +1158,40 @@ async def _close_quietly(component: Any, method: str) -> None:
             await result
     except Exception:
         logger.exception("closing %s failed", type(component).__name__)
+
+
+def people_policy(settings: Settings) -> PresencePolicy | None:
+    """Who a turn is with (ADR 0027), or None with `[people]` off. Warns when the owner
+    is enrolled neither as a voice nor as a face: then no turn but a typed one, or one
+    carried over from it, can be the owner's."""
+    people = settings.people
+    if not people.enabled or people.owner is None:
+        return None
+    if not owner_enrolled(settings, people.owner):
+        logger.warning(
+            "[people] owner %r is enrolled neither as a voice nor as a face, so only typed "
+            "turns (and those shortly after) are the owner's; spoken ones are a guest's, and "
+            "a guest cannot enrol anyone. Enrol from `lucy chat`, where typing is the owner: "
+            'type "remember my face" (camera needed) under that name; then voice turns with '
+            'that face in view are the owner\'s and "remember my voice" works by voice too.',
+            people.owner,
+        )
+    return PresencePolicy(people.owner, people.carry_minutes)
+
+
+def owner_enrolled(settings: Settings, name: str) -> bool:
+    """Whether `name` (ignoring case) has an enrolled voice or face; reads only."""
+    root = Path(settings.workspace.path).expanduser()  # not `Workspace`: it creates it
+    folded = name.casefold()
+    voices = root / SPEAKERS
+    if voices.is_dir() and any(
+        p.is_dir() and p.name.casefold() == folded for p in voices.iterdir()
+    ):
+        return True
+    if not (root / FACES / FACE_BOOK).is_file():
+        return False
+    try:
+        return FaceBook(Workspace(settings.workspace.path)).find(name) is not None
+    except Exception:  # an unreadable face book: say so as not enrolled
+        logger.debug("could not read the face book", exc_info=True)
+        return False

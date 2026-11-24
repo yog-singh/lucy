@@ -109,7 +109,11 @@ from lucy.voice.speakers import SpeakerTagger, await_tag
 from lucy.voice.vad import VAD
 
 if TYPE_CHECKING:
+    from lucy.core.presence import Presence
     from lucy.vision.glance import Glancer
+
+PresenceLookup = Callable[[UserMessage], Awaitable["Presence | None"]]
+"""Who a turn will be with, before it is published (`LucyApp.turn_with`, ADR 0027)."""
 
 logger = logging.getLogger(__name__)
 
@@ -237,6 +241,9 @@ class TurnTimings:
     seen: list[str] | None = None  # names from the glance (ADR 0026), if it was in time
     seen_unknown: int | None = None  # faces in the glance that matched nobody
     seen_ready: float | None = None  # when the glance was taken, if in time
+    turn_with: str | None = None  # "owner" or "guest", with [people] (ADR 0027)
+    turn_with_name: str | None = None  # the recognised person, if any
+    turn_with_basis: str | None = None  # the rule that decided (`lucy.core.presence`)
 
     def stages(self) -> dict[str, float | None]:
         """Durations of each stage, and end of speech to first audio (`total`)."""
@@ -344,8 +351,10 @@ class VoiceSession:
         speakers: SpeakerTagger | None = None,
         enroller: Enroller | None = None,
         glancer: Glancer | None = None,
+        presence: PresenceLookup | None = None,
     ) -> None:
         self._bus = bus
+        self._presence = presence
         self._speakers = speakers
         self._glancer = glancer
         self._enroller = enroller
@@ -657,12 +666,6 @@ class VoiceSession:
             if seen is not None:
                 timings.seen_ready = self._io.now()
                 timings.seen, timings.seen_unknown = seen.names, seen.unknown
-            show = getattr(self._ui, "user_speaker", None)
-            if tag is not None and tag.speaker is not None and show is not None:
-                show(text, tag.speaker)
-            else:
-                self._ui.user(text)
-            replied = True
             message = UserMessage(
                 id=message_id,
                 session_id=self._session_id,
@@ -674,6 +677,12 @@ class VoiceSession:
                 audio_s=round(utterance.duration, 3),
                 seen=seen,
             )
+            presence = await self._turn_with(message)
+            if presence is not None:
+                timings.turn_with, timings.turn_with_name = presence.role, presence.name
+                timings.turn_with_basis = presence.basis
+            self._show_user(text, tag.speaker if tag is not None else None, presence)
+            replied = True
             request = await self._converse(message, timings)
             if request is not None:
                 self._record(timings)
@@ -684,6 +693,30 @@ class VoiceSession:
             if not recorded:
                 self._record(timings)
             self._listen_again(gate=replied)
+
+    async def _turn_with(self, message: UserMessage) -> Presence | None:
+        """Who the turn will be with (ADR 0027), or None (`[people]` off, or the lookup
+        failed: the turn goes on, and the orchestrator still records its decision)."""
+        if self._presence is None:
+            return None
+        try:
+            return await self._presence(message)
+        except Exception:
+            logger.warning("could not tell who the turn is with", exc_info=True)
+            return None
+
+    def _show_user(self, text: str, speaker: str | None, presence: Presence | None) -> None:
+        """The heard words, with the voice tag and, for a guest's turn, a marker."""
+        if presence is not None and presence.guest:
+            marked = getattr(self._ui, "user_guest", None)
+            if marked is not None:
+                marked(text, speaker, presence.label())
+                return
+        show = getattr(self._ui, "user_speaker", None)
+        if speaker is not None and show is not None:
+            show(text, speaker)
+        else:
+            self._ui.user(text)
 
     async def _converse(
         self, inbound: UserMessage | TimerFired, timings: TurnTimings
